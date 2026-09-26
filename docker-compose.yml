@@ -1,0 +1,49 @@
+# docker-compose.yml
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dogfood}
+      POSTGRES_USER: ${POSTGRES_USER:-dogfood}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dogfood-local-only-change-me}
+    volumes:
+      - dogfood_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dogfood} -d ${POSTGRES_DB:-dogfood}"]
+      interval: 3s
+      retries: 20
+      start_period: 5s
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${DOGFOOD_PORT:-8000}:8000"
+    volumes:
+      - dogfood_state:/state
+    environment:
+      DOGFOOD_DEBUG: ${DOGFOOD_DEBUG:-0}
+      DOGFOOD_WORKERS: ${DOGFOOD_WORKERS:-2}
+      DOGFOOD_HOST: ${DOGFOOD_HOST:-}
+      DOGFOOD_TLS: ${DOGFOOD_TLS:-0}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-}
+      DOGFOOD_ADMIN_PASSWORD: ${DOGFOOD_ADMIN_PASSWORD:-}
+      DOGFOOD_ADMIN_EMAIL: ${DOGFOOD_ADMIN_EMAIL:-}
+      DOGFOOD_DB_HOST: db
+      DOGFOOD_DB_PORT: "5432"
+      DOGFOOD_DB_NAME: ${POSTGRES_DB:-dogfood}
+      DOGFOOD_DB_USER: ${POSTGRES_USER:-dogfood}
+      DOGFOOD_DB_PASSWORD: ${POSTGRES_PASSWORD:-dogfood-local-only-change-me}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read() == b'ok' else 1)"]
+      interval: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  dogfood_pgdata:
+  dogfood_state:

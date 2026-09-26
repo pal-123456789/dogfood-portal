@@ -1,0 +1,18 @@
+# .github/workflows/ci.yml
+name: ci
+on:
+  push: {branches: [main]}
+  pull_request:
+jobs:
+  one-command:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up --build --detach --wait
+      - run: docker compose logs web
+      - run: docker compose exec -T web python -m pytest tests/ -q
+      - name: second boot is idempotent
+        run: docker compose restart web && sleep 10 && docker compose logs --tail=20 web
+      - if: always()
+        run: docker compose down

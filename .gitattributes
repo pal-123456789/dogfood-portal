@@ -1,0 +1,8 @@
+# .gitattributes
+# One rule, for one file. `docker/entrypoint.sh` begins with a shebang, and a shebang whose
+# line ends in CR is not a shebang: the kernel looks for an interpreter literally named
+# `/bin/sh\r`. `eol=lf` makes CR impossible on checkout even when the person cloning has
+# `core.autocrlf=true`, which is the Git for Windows default. §15 fault 20 has the
+# measurements. Applied to `*` and not `*.sh` because every consumer of every file in this
+# repository is a Linux container or CPython, and none of them wants CR.
+* text=auto eol=lf
