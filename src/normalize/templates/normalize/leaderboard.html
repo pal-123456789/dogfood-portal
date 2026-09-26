@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Normalized leaderboard · {{ event.name }}{% endblock %}
+{% block content %}
+<style>
+  table.lb{border-collapse:collapse;width:100%;margin:14px 0 40px;font-size:.92rem}
+  table.lb th,table.lb td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left}
+  table.lb th{color:var(--muted);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.03em}
+  table.lb td.num{text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .diag{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 6px}
+  .diag .tag b{color:var(--ink)}
+  .pos{color:var(--accent-ink);font-weight:700}
+  .delta.up{color:var(--accent-ink)} .delta.dn{color:#b23a3a}
+  .flag{font-size:.72rem;color:#8a5a00;background:#fbf0d8;border-radius:6px;padding:1px 7px;white-space:nowrap}
+  .ci{color:var(--muted);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.85rem}
+</style>
+<div class="lede">
+  <h1>Normalized leaderboard</h1>
+  <p>Severity-adjusted quality (q) from the ridge / partial-pooling model, with bootstrap rank intervals. Organizer view.</p>
+</div>
+
+{% if data.rows %}
+<div class="diag">
+  <span class="tag">λ <b>{{ data.lambda }}</b></span>
+  <span class="tag">σ <b>{{ data.sigma }}</b></span>
+  <span class="tag">components <b>{{ data.n_components }}</b></span>
+  <span class="tag">gauge err <b>{{ data.gauge_error|stringformat:".1e" }}</b></span>
+  <span class="tag">ballots <b>{{ data.n_ballots }}</b></span>
+  <span class="tag">projects <b>{{ data.n_submissions }}</b></span>
+  <span class="tag">judges <b>{{ data.n_judges }}</b></span>
+  <span class="tag">bootstrap <b>{{ data.n_boot }}</b></span>
+  <span class="tag">unresolved pairs <b>{{ data.unresolved_count }}</b></span>
+</div>
+<p class="notice">Rank is by point quality q. <b>Δ</b> = q − raw mean (how much removing judge
+severity moved the project). The <span class="flag">unresolved</span> flag marks an adjacent
+pair the bootstrap cannot separate (win-prob in [0.10, 0.90] or Δq &lt; 0.25) — the data does
+not resolve that order. Machine-readable: <a href="leaderboard.json">leaderboard.json</a>.</p>
+<table class="lb">
+  <thead><tr>
+    <th>#</th><th>Project</th><th>Track</th>
+    <th>q</th><th>Raw</th><th>Δ</th><th>90% rank</th><th>Ballots</th><th></th>
+  </tr></thead>
+  <tbody>
+  {% for r in data.rows %}
+    <tr>
+      <td class="pos">{{ r.rank }}</td>
+      <td>{{ r.title }} <span class="ci">{{ r.submission }}</span></td>
+      <td>{{ r.track }}</td>
+      <td class="num">{{ r.q }}</td>
+      <td class="num">{{ r.raw_mean }}</td>
+      <td class="num delta {% if r.delta >= 0 %}up{% else %}dn{% endif %}">{{ r.delta }}</td>
+      <td class="ci">[{{ r.rank_lo }}, {{ r.rank_hi }}]</td>
+      <td class="num">{{ r.n_ballots }}</td>
+      <td>{% if r.tied_with_next %}<span class="flag">unresolved ↓</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="notice">No ballots recorded yet — the normalized leaderboard appears once judging begins.</p>
+{% endif %}
+{% endblock %}

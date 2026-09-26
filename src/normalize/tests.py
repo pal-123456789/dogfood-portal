@@ -1,3 +1,148 @@
-from django.test import TestCase
+# src/normalize/tests.py
+"""Tests for the normalization app.
 
-# Create your tests here.
+Two layers. EngineTests exercises the pure-numpy estimator with no DB (SimpleTestCase) - the
+mathematical invariants that make the ranking defensible: weighted composite, the singular
+lambda=0 guard, connected-component counting, the per-component mean(b)=0 gauge, a lambda pick
+that stays inside the grid, and determinism. NormalizeServiceTests wires a tiny connected event
+through the ORM and asserts the service output plus the organizer-only access gate (401/403/200)
+- the same gate shape as the CSV export, on routes that are NOT the checker's five.
+"""
+import numpy as np
+
+from django.contrib.auth import get_user_model
+from django.test import Client, SimpleTestCase, TestCase
+from django.utils import timezone
+
+from events.models import Event, EventMembership, Team, Track
+from judging.models import Ballot, JudgeAssignment, RubricWeight
+from submissions.models import Submission
+
+from normalize import engine, services
+
+User = get_user_model()
+
+
+class EngineTests(SimpleTestCase):
+    def test_composite_weighted(self):
+        raw = {"functionality": 5, "quality": 3, "innovation": 1}
+        equal = {c: 1.0 for c in engine.CRITERIA}
+        self.assertAlmostEqual(engine.composite(raw, equal), 3.0)
+        heavy = {"functionality": 2.0, "quality": 1.0, "innovation": 1.0}
+        self.assertAlmostEqual(engine.composite(raw, heavy), (2 * 5 + 3 + 1) / 4.0)
+
+    def test_composite_zero_weights_raises(self):
+        with self.assertRaises(ValueError):
+            engine.composite({c: 3 for c in engine.CRITERIA}, {c: 0 for c in engine.CRITERIA})
+
+    def test_fit_rejects_nonpositive_lambda(self):
+        with self.assertRaises(ValueError):
+            engine.fit([3.0, 4.0], ["j1", "j2"], ["s1", "s1"], 0.0)
+
+    def test_components_split_then_bridge(self):
+        jk, sk = ["j1", "j1", "j2", "j2"], ["s1", "s2", "s3", "s4"]
+        self.assertEqual(engine.connected_components(jk, sk)[2], 2)
+        self.assertEqual(engine.connected_components(jk + ["j1"], sk + ["s3"])[2], 1)
+
+    def test_gauge_zero_per_component(self):
+        rng = np.random.default_rng(0)
+        jk = ["j%d" % j for j in range(4) for _ in range(4)]
+        sk = ["s%d" % ((j + k) % 5) for j in range(4) for k in range(4)]
+        y = list(rng.uniform(1, 5, size=len(jk)))
+        _, b = engine.fit(y, jk, sk, 1.0)
+        _, cbj, _ = engine.connected_components(jk, sk)
+        self.assertLess(engine.component_gauge_error(b, cbj), 1e-9)
+
+    def test_select_lambda_in_grid_and_positive(self):
+        rng = np.random.default_rng(1)
+        jk = ["j%d" % j for j in range(6) for _ in range(6)]
+        sk = ["s%d" % ((j * 3 + k) % 8) for j in range(6) for k in range(6)]
+        y = list(rng.uniform(1, 5, size=len(jk)))
+        lam, _ = engine.select_lambda(y, jk, sk, repeats=2)
+        self.assertIn(lam, engine.LAMBDA_GRID)
+        self.assertGreater(lam, 0)
+
+    def test_rank_report_deterministic(self):
+        rng = np.random.default_rng(2)
+        jk = ["j%d" % j for j in range(5) for _ in range(5)]
+        sk = ["s%d" % ((j + 2 * k) % 7) for j in range(5) for k in range(5)]
+        y = list(rng.uniform(1, 5, size=len(jk)))
+        r1 = engine.rank_report(y, jk, sk, lam=1.0, n_boot=200, seed=0)
+        r2 = engine.rank_report(y, jk, sk, lam=1.0, n_boot=200, seed=0)
+        self.assertTrue(np.allclose(r1["q"], r2["q"]))
+
+class NormalizeServiceTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.event = Event.objects.create(
+            ext_id="evt_t", name="Test Event", state=Event.CLOSED,
+            submissions_close=timezone.now() - timezone.timedelta(days=1))
+        track = Track.objects.create(ext_id="trk_t", event=cls.event, name="T")
+        team = Team.objects.create(ext_id="tm_t", event=cls.event, name="Team")
+        for c in engine.CRITERIA:
+            RubricWeight.objects.create(event=cls.event, criterion=c, weight=1.0)
+        subs = {}
+        for sid in ("prj_a", "prj_b", "prj_c"):
+            subs[sid] = Submission.objects.create(
+                ext_id=sid, event=cls.event, team=team, track=track,
+                title="Title %s" % sid, state=Submission.SUBMITTED)
+        # Perfectly additive design: quality prj_a>prj_b>prj_c, judge biases +/-1 about 0.
+        base = {"prj_a": 4, "prj_b": 3, "prj_c": 2}
+        bias = [0, 1, -1]
+        for n in range(3):
+            u = User.objects.create_user(email="judge%d@t.demo" % n, display_name="J%d" % n)
+            m = EventMembership.objects.create(
+                user=u, event=cls.event, role=EventMembership.JUDGE, ext_id="jdg_%d" % n)
+            for sid, sub in subs.items():
+                a = JudgeAssignment.objects.create(judge=m, submission=sub)
+                v = base[sid] + bias[n]
+                Ballot.objects.create(assignment=a, functionality=v, quality=v, innovation=v)
+        cls.org = User.objects.create_user(email="org@t.demo", display_name="Org")
+        EventMembership.objects.create(user=cls.org, event=cls.event,
+                                       role=EventMembership.ORGANIZER)
+        cls.participant = User.objects.create_user(email="part@t.demo", display_name="Part")
+        EventMembership.objects.create(user=cls.participant, event=cls.event,
+                                       role=EventMembership.PARTICIPANT)
+
+    def test_observed_shape(self):
+        y, jk, sk = services.observed(self.event)
+        self.assertEqual(len(y), 9)
+        self.assertEqual(set(sk), {"prj_a", "prj_b", "prj_c"})
+
+    def test_leaderboard_invariants(self):
+        data = services.leaderboard(self.event, n_boot=200)
+        self.assertEqual(data["n_components"], 1)
+        self.assertLess(data["gauge_error"], 1e-9)
+        self.assertIn(data["lambda"], engine.LAMBDA_GRID)
+        self.assertGreater(data["lambda"], 0)
+        qs = [r["q"] for r in data["rows"]]
+        self.assertEqual(qs, sorted(qs, reverse=True))       # ranked by quality, best first
+        self.assertEqual(data["rows"][0]["submission"], "prj_a")
+
+    def test_leaderboard_deterministic(self):
+        a = services.leaderboard(self.event, n_boot=200)
+        b = services.leaderboard(self.event, n_boot=200)
+        self.assertEqual([r["submission"] for r in a["rows"]],
+                         [r["submission"] for r in b["rows"]])
+        self.assertEqual([r["q"] for r in a["rows"]], [r["q"] for r in b["rows"]])
+
+    def test_gate_anonymous_401(self):
+        c = Client()
+        self.assertEqual(c.get("/normalize/").status_code, 401)
+        self.assertEqual(c.get("/normalize/leaderboard.json").status_code, 401)
+
+    def test_gate_participant_403(self):
+        c = Client()
+        c.force_login(self.participant)
+        self.assertEqual(c.get("/normalize/").status_code, 403)
+        self.assertEqual(c.get("/normalize/leaderboard.json").status_code, 403)
+
+    def test_gate_organizer_200(self):
+        c = Client()
+        c.force_login(self.org)
+        html = c.get("/normalize/")
+        self.assertEqual(html.status_code, 200)
+        self.assertTemplateUsed(html, "normalize/leaderboard.html")
+        js = c.get("/normalize/leaderboard.json")
+        self.assertEqual(js.status_code, 200)
+        self.assertEqual(js.json()["rows"][0]["submission"], "prj_a")
