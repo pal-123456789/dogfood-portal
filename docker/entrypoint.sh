@@ -44,6 +44,13 @@ python src/manage.py migrate --noinput
 python src/manage.py createcachetable
 python src/manage.py dogfood_import --if-empty /app/fixtures.json
 
+# 6.5. Prove the seed is exactly what the acceptance contract expects, but ONLY when the
+#      demo shim is armed (verify_demo self-skips with exit 0 when DOGFOOD_DEMO is off, so
+#      this line is a no-op in a real deployment). Under `set -eu` a CommandError here fails
+#      the boot on purpose: a silently wrong fixture is worse than a container that refuses
+#      to start and tells the operator which invariant broke.
+python src/manage.py verify_demo
+
 # 7. Bootstrap administrator. [T-0: decide from spec.md] -- see the note below; this is the
 #    one line in this file that a wrong guess turns into a lost gate.
 python -m portal.bootstrap ensure-admin

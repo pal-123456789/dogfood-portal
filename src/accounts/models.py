@@ -10,6 +10,7 @@ from django.contrib.auth.models import PermissionsMixin
 from django.db import models
 from django.db.models.functions import Lower
 from django.utils import timezone
+from django.conf import settings
 
 
 class AppUserManager(BaseUserManager):
@@ -80,3 +81,24 @@ class AppUser(AbstractBaseUser, PermissionsMixin):
 
     def get_full_name(self):
         return self.display_name or self.email
+
+
+class DemoSession(models.Model):
+    """Maps a `.dogfood.toml` `session=` cookie value to a seeded user.
+
+    This is the whole mechanism behind the DEMO auth shim (§1 #1): the acceptance checker
+    never logs in, it just attaches `Cookie: session=org_7f2a`. DOGFOOD_DEMO-gated
+    middleware reads that value, looks it up here, and sets request.user. The table is
+    seeded only under the local evaluation stack and is empty in production (real users
+    log in normally). Token is the primary key; it is the opaque bearer string, not a PII.
+    """
+    token = models.CharField(max_length=64, unique=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                             related_name="demo_sessions")
+    label = models.CharField(max_length=32, blank=True, default="")
+
+    class Meta:
+        db_table = "demo_session"
+
+    def __str__(self):
+        return "%s -> %s" % (self.token, self.user_id)

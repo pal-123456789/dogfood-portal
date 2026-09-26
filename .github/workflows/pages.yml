@@ -1,7 +1,10 @@
 # .github/workflows/pages.yml
 name: pages
 on:
-  push: {branches: [main]}
+  # Manual-only until the docs/ tree exists AND Pages is enabled
+  # (repo Settings > Pages > Source: GitHub Actions). Flip back to
+  # `push: {branches: [main]}` in the commit that lands docs/.
+  workflow_dispatch: {}
 permissions: {contents: read, pages: write, id-token: write}
 jobs:
   build-and-deploy:

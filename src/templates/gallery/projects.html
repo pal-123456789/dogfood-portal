@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Projects · Dogfood Portal{% endblock %}
+{% block content %}
+  <section class="lede">
+    <h1>{% if event %}{{ event.name }}{% else %}Projects{% endif %}</h1>
+    <p>{{ submissions|length }} submission{{ submissions|length|pluralize }} across the event.</p>
+  </section>
+
+  {% if tracks %}
+  <div class="filters">
+    <a class="chip {% if not active_track %}on{% endif %}" href="/projects">All tracks</a>
+    {% for t in tracks %}
+      <a class="chip {% if active_track == t.ext_id %}on{% endif %}"
+         href="/projects?track={{ t.ext_id|urlencode }}">{{ t.name }}</a>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if submissions %}
+  <div class="grid">
+    {% for s in submissions %}
+      <article class="card">
+        <h3>{{ s.title }}</h3>
+        <p class="sum">{{ s.summary|default:"" }}</p>
+        <div class="meta">
+          <span class="tag">{{ s.track.name }}</span>
+          <span class="tag">{{ s.team.name }}</span>
+          {% if s.repo_url %}<span class="tag"><a href="{{ s.repo_url }}" rel="nofollow noopener">repo</a></span>{% endif %}
+        </div>
+      </article>
+    {% endfor %}
+  </div>
+  {% else %}
+    <p class="empty">No submissions yet.</p>
+  {% endif %}
+{% endblock %}

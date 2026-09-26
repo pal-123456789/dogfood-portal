@@ -7,6 +7,11 @@ def _flag(name, default="0"):
 
 DEBUG = _flag("DOGFOOD_DEBUG")
 
+# DEMO auth shim switch. Gated on its OWN flag, never DEBUG: the acceptance stack runs
+# DOGFOOD_DEBUG=0 but still needs the cookie->user shim, and production must be able to run
+# DOGFOOD_DEMO=0 with DEBUG=0. The eval compose sets DOGFOOD_DEMO=1; prod docs say =0.
+DOGFOOD_DEMO = _flag("DOGFOOD_DEMO")
+
 # SECRET_KEY: environment, then the state volume, then an ephemeral key so that
 # `collectstatic` can run at BUILD time when neither exists. The entrypoint always writes
 # the state file before gunicorn starts, so a served request never uses an ephemeral key.
@@ -32,6 +37,9 @@ MIDDLEWARE = [                                                  # §6: this orde
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # DemoAuth runs AFTER AuthenticationMiddleware (so request.user already exists) and is a
+    # no-op unless DOGFOOD_DEMO is on and a known `session=` cookie is present. §1 #1.
+    "portal.middleware.DemoAuthMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "portal.middleware.ContentSecurityPolicyMiddleware",        # see §15 fault 5

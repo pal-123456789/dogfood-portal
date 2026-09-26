@@ -2,6 +2,7 @@
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-dogfood}
       POSTGRES_USER: ${POSTGRES_USER:-dogfood}
@@ -18,6 +19,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
@@ -27,6 +29,7 @@ services:
       - dogfood_state:/state
     environment:
       DOGFOOD_DEBUG: ${DOGFOOD_DEBUG:-0}
+      DOGFOOD_DEMO: ${DOGFOOD_DEMO:-1}
       DOGFOOD_WORKERS: ${DOGFOOD_WORKERS:-2}
       DOGFOOD_HOST: ${DOGFOOD_HOST:-}
       DOGFOOD_TLS: ${DOGFOOD_TLS:-0}

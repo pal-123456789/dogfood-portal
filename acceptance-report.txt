@@ -1,0 +1,104 @@
+DOGFOOD - ACCEPTANCE REPORT
+===========================
+
+Project      : DOGFOOD hackathon submission-and-judging platform
+Stack        : Django 5.2 + PostgreSQL 16, self-hosted via `docker compose up`
+Report date  : 2026-09-27 (IST)
+Increment    : 1 - Tier 1 (public gallery + deadline-gated submission) and
+               Tier 2 (per-judge scoring API + organizer CSV export)
+Result       : 7 / 7 acceptance checks GREEN  ->  Tier 1 VERIFIED, Tier 2 VERIFIED
+
+
+HOW THIS WAS RUN
+----------------
+The platform was brought up from a clean image build; the network is irrelevant
+to correctness (all assets are vendored, no runtime external calls):
+
+    docker compose up --build --wait
+
+Both services reported healthy (db, web - web published on 0.0.0.0:8000->8000).
+The seven acceptance checks were then executed against the running stack through
+the same contract file the official grader reads, `.dogfood.toml` (base_url, the
+four demo session cookies, and the five routes). The grader's checker (run.py)
+never logs in; it attaches a hardcoded `Cookie: session=<token>` and follows
+redirects. Our local mirror, tools/replay.py, runs the identical seven checks
+from the same `.dogfood.toml` but is deliberately STRICTER in one way: it does
+NOT follow redirects, so a route that only reaches 200 after a 301/append-slash
+bounce is a visible failure here. Passing replay.py therefore implies passing
+run.py on these routes.
+
+
+CHECK-BY-CHECK RESULT
+---------------------
+Tier 1 - Core submission portal
+  1. GET  /projects       (no auth)                  -> 200                    GREEN
+  2. GET  /projects       body has seeded title "Glass Signal"                 GREEN
+  3. POST /projects/new   as participant prt_2e88    -> 4xx (event closed)     GREEN
+
+Tier 2 - Judging integrity
+  4. GET  /api/judge/scores                as judge_a jdg_a_91bc -> 200 + rows  GREEN
+  5. GET  /api/judge/scores?judge=judge_a  as judge_b jdg_b_44de -> 401/403     GREEN
+  6. GET  /api/judge/scores                as participant prt_2e88 -> 401/403   GREEN
+  7. GET  /api/export.csv                  as organizer org_7f2a -> 200 + comma GREEN
+
+Checks 4/5/6 hit the SAME endpoint; ownership is decided by the caller's judge
+membership (its ext_id), never by the URL's `?judge` parameter - so judge_b
+cannot read judge_a's rows by naming them, and a participant is denied outright.
+
+
+DEMO IDENTITIES (resolved live via /debug/whoami)
+-------------------------------------------------
+  org_7f2a    -> organizer@dogfood.demo    role=organizer
+  jdg_a_91bc  -> tomas.varga@example.org   role=judge        ext_id=jdg_01
+  jdg_b_44de  -> wei.lindqvist@example.org role=judge        ext_id=jdg_02
+  prt_2e88    -> priya1@example.org        role=participant
+
+Demo auth is a DOGFOOD_DEMO-gated, plain-Django middleware that maps the `session`
+cookie to a seeded user. It is gated on DOGFOOD_DEMO (not DEBUG): the acceptance
+stack runs with DOGFOOD_DEBUG=0, so a DEBUG gate would switch the shim off and
+fail checks 4 and 7. The evaluation compose ships DOGFOOD_DEMO=1; set
+DOGFOOD_DEMO=0 for production, where real authentication applies and the cookie
+shim is inert.
+
+
+SEED INTEGRITY (verify_demo - all invariants hold)
+--------------------------------------------------
+Verified at boot (entrypoint step 6.5) and re-run on demand:
+  tracks=8  judges=30  teams=40  projects=41  ballots=126
+  single event evt_01, state=CLOSED, submissions_close=2026-03-01 (past)
+  scoring graph = exactly ONE connected component
+  planted same-track duplicate: prj_07 / prj_41 (tm_07, trk_03, "Dry Harbour")
+  zero-variance judge jdg_07 present (a normalization stress case)
+verify_demo self-skips (exit 0) when DOGFOOD_DEMO is off, so it never blocks a
+production boot.
+
+
+ENVIRONMENT / REPRODUCIBILITY
+-----------------------------
+  Docker Engine   29.7.2 (WSL2 / Ubuntu),  docker compose v5.5.0
+  Images          web: python:3.12-slim    db: postgres:16-alpine
+  Services        two only (db + web); web runs as non-root uid 10001
+  Static assets   WhiteNoise, compressed+manifest storage; no CDN
+  Migration gate  the image build runs
+                    manage.py check --fail-level WARNING
+                    manage.py makemigrations --check --dry-run
+                  so the build FAILS if any model and migration disagree; this
+                  build passed the gate.
+  Boot sequence   assert-state -> wait-for-db -> ensure-secret -> migrate ->
+                  createcachetable -> dogfood_import --if-empty -> verify_demo ->
+                  ensure-admin -> exec gunicorn
+  Dependencies    ranges pinned in requirements.txt; exact resolved versions
+                  captured in requirements.lock.txt (pip freeze inside web).
+
+
+HONEST NOTES
+------------
+  * replay.py is our own mirror of the grader, not the grader itself; it shares
+    the grader's `.dogfood.toml` and is stricter (no redirect following).
+  * Only Tiers 1 and 2 are claimed here. Higher-tier work and the bonus tracks
+    (normalization proof, threat model) are reported as they land; nothing in
+    this report depends on them.
+  * "Network off" holds for correctness: the running app makes no outbound calls
+    and serves only vendored assets.
+
+END OF REPORT

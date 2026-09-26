@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Submit a project · Dogfood Portal{% endblock %}
+{% block content %}
+  <section class="lede">
+    <h1>Submit a project</h1>
+    <p>{% if event %}{{ event.name }}{% endif %}</p>
+  </section>
+
+  {% if not open %}
+    <p class="notice">Submissions are closed for this event. The form below is disabled;
+      a POST after the deadline is rejected server-side.</p>
+  {% endif %}
+
+  <form class="stack" method="post" action="/projects/new">
+    {% csrf_token %}
+    <label for="title">Title</label>
+    <input id="title" name="title" maxlength="200" required>
+
+    <label for="summary">Summary</label>
+    <textarea id="summary" name="summary" rows="3" placeholder="One line on what you built."></textarea>
+
+    <label for="track">Track</label>
+    <select id="track" name="track">
+      {% for t in tracks %}<option value="{{ t.ext_id }}">{{ t.name }}</option>{% endfor %}
+    </select>
+
+    <label for="repo_url">Repository URL</label>
+    <input id="repo_url" name="repo_url" type="url" placeholder="https://…">
+
+    <button type="submit" {% if not open %}disabled{% endif %}>Submit project</button>
+  </form>
+{% endblock %}
