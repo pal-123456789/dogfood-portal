@@ -52,3 +52,49 @@ class NormalizationRun(models.Model):
 
     def __str__(self):
         return "%s (%s)" % (self.run_ext_id, self.event_ext_id)
+
+
+class ResultPublication(models.Model):
+    """One append-only act of publishing official results for an event (W1).
+
+    A NormalizationRun is the *computational* artifact -- a signed, reproducible ranking. Publishing
+    is the distinct *governance* act of designating one such run as the event's OFFICIAL, publicly
+    visible result. The two are kept separate on purpose: a run can be built and inspected privately
+    (organizer-only `/normalize/`), and only an explicit publish makes a ranking public at
+    `/normalize/results`. That gap is a real access-control property -- rankings are never visible to
+    participants until the organizer publishes them (docs/THREAT-MODEL.md W1).
+
+    Append-only + versioned, mirroring BallotRevision (Increment 5): each publish writes the next
+    `version` for the event (never an update or delete), so the publication history is a tamper-
+    evident record of what was shown and when. `UNIQUE(event_ext_id, version)` makes a duplicate
+    version a loud IntegrityError. The current official result is simply the highest-version row.
+
+    `run_ext_id` names the exact signed run being published (loose string coupling, matching
+    NormalizationRun's own ext-id style); the served ranking is that run's FROZEN `result`, so what
+    the public sees canonicalizes to the signed `result_hash` and verifies offline. `audit_seq` is
+    the seq of the `results.published` event co-committed on the audit chain in the SAME transaction
+    as this row and the run itself (normalize.results.publish_results), so run + publication + chain
+    record all commit or roll back together.
+    """
+    PROVISIONAL, FINAL = "provisional", "final"
+    STATUSES = [(PROVISIONAL, "provisional"), (FINAL, "final")]
+
+    event_ext_id = models.CharField(max_length=64)
+    run_ext_id = models.CharField(max_length=40)
+    version = models.PositiveIntegerField()
+    status = models.CharField(max_length=16, choices=STATUSES, default=FINAL)
+    note = models.CharField(max_length=200, blank=True, default="")
+    published_by = models.CharField(max_length=64, blank=True, default="")
+    audit_seq = models.PositiveIntegerField()
+    recorded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "result_publication"
+        ordering = ["id"]
+        constraints = [
+            models.UniqueConstraint(fields=["event_ext_id", "version"],
+                                    name="uniq_event_result_version"),
+        ]
+
+    def __str__(self):
+        return "%s v%d (%s)" % (self.event_ext_id, self.version, self.status)

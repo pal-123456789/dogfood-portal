@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Official results · {{ event.name }}{% endblock %}
+{% block content %}
+<style>
+  table.lb{border-collapse:collapse;width:100%;margin:14px 0 32px;font-size:.92rem}
+  table.lb th,table.lb td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left}
+  table.lb th{color:var(--muted);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.03em}
+  table.lb td.num{text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .pos{color:var(--accent-ink);font-weight:700}
+  .delta.up{color:var(--accent-ink)} .delta.dn{color:#b23a3a}
+  .flag{font-size:.72rem;color:#8a5a00;background:#fbf0d8;border-radius:6px;padding:1px 7px;white-space:nowrap}
+  .ci{color:var(--muted);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.85rem}
+  .prov{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:14px 0 8px;background:var(--panel,#fafafa)}
+  .prov h2{margin:0 0 8px;font-size:.9rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+  .prov dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:0;font-size:.86rem}
+  .prov dt{color:var(--muted)} .prov dd{margin:0;font-family:ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
+  .badge{display:inline-block;font-size:.72rem;border-radius:6px;padding:1px 8px;font-weight:700}
+  .badge.final{color:#0a5a2a;background:#dcf4e5} .badge.provisional{color:#8a5a00;background:#fbf0d8}
+  .hist{font-size:.82rem;color:var(--muted);margin:8px 0 32px}
+  .hist li{margin:2px 0}
+</style>
+<div class="lede">
+  <h1>Official results</h1>
+  <p>The published, severity-adjusted ranking for {{ event.name }}. This page shows a signed,
+     reproducible normalization run — not a live recompute — so it verifies offline.</p>
+</div>
+
+{% if not data.published %}
+<p class="notice">Results for this event have not been published yet. The organizer publishes the
+official ranking here once judging is complete; until then, rankings are not public.</p>
+{% else %}
+<div class="prov">
+  <h2>Provenance — version {{ data.version }}
+    <span class="badge {{ data.status }}">{{ data.status }}</span></h2>
+  {% if data.note %}<p style="margin:0 0 8px">{{ data.note }}</p>{% endif %}
+  <dl>
+    <dt>run</dt><dd>{{ data.run_ext_id }}</dd>
+    <dt>engine</dt><dd>{{ data.engine_version }}</dd>
+    <dt>result_hash</dt><dd>{{ data.result_hash }}</dd>
+    <dt>inputs_hash</dt><dd>{{ data.inputs_hash }}</dd>
+    <dt>key fingerprint</dt><dd>{{ data.fingerprint }}</dd>
+    <dt>λ (pinned)</dt><dd>{{ data.lambda }}</dd>
+    <dt>audit seq</dt><dd>{{ data.audit_seq }}</dd>
+    <dt>published</dt><dd>{{ data.published_at }}</dd>
+  </dl>
+  <p class="notice" style="margin:10px 0 0">Verify independently: pin <code>public-key.pem</code> +
+  fingerprint <b>before</b> judging, then re-run the ranking from the signed inputs with
+  <code>python -m normalize.verify</code> and confirm it canonicalizes to
+  <code>result_hash</code>. Machine-readable: <a href="results.json">results.json</a>.</p>
+</div>
+
+{% if data.result.rows %}
+<table class="lb">
+  <thead><tr>
+    <th>#</th><th>Project</th><th>Track</th>
+    <th>q</th><th>Raw</th><th>Δ</th><th>90% rank</th><th>Ballots</th><th></th>
+  </tr></thead>
+  <tbody>
+  {% for r in data.result.rows %}
+    <tr>
+      <td class="pos">{{ r.rank }}</td>
+      <td>{{ r.title }} <span class="ci">{{ r.submission }}</span></td>
+      <td>{{ r.track }}</td>
+      <td class="num">{{ r.q }}</td>
+      <td class="num">{{ r.raw_mean }}</td>
+      <td class="num delta {% if r.delta >= 0 %}up{% else %}dn{% endif %}">{{ r.delta }}</td>
+      <td class="ci">[{{ r.rank_lo }}, {{ r.rank_hi }}]</td>
+      <td class="num">{{ r.n_ballots }}</td>
+      <td>{% if r.tied_with_next %}<span class="flag">unresolved ↓</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="notice">This published run contains no ranked projects.</p>
+{% endif %}
+
+{% if history|length > 1 %}
+<div class="hist">
+  <b>Publication history</b> (append-only):
+  <ul>
+  {% for h in history %}
+    <li>v{{ h.version }} · {{ h.status }} · run {{ h.run_ext_id }} · audit seq {{ h.audit_seq }}
+        · {{ h.recorded_at|date:"Y-m-d H:i" }}{% if h.note %} — {{ h.note }}{% endif %}</li>
+  {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

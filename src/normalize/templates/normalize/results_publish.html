@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Publish results · {{ event.name }}{% endblock %}
+{% block content %}
+<style>
+  .console{border:1px solid var(--line);border-radius:10px;padding:16px;margin:14px 0;background:var(--panel,#fafafa)}
+  .console h2{margin:0 0 10px;font-size:.9rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+  .kv{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.85rem;word-break:break-all}
+  .badge{display:inline-block;font-size:.72rem;border-radius:6px;padding:1px 8px;font-weight:700}
+  .badge.final{color:#0a5a2a;background:#dcf4e5} .badge.provisional{color:#8a5a00;background:#fbf0d8}
+  form.stack{display:grid;gap:8px;max-width:520px;margin:8px 0}
+  form.stack label{font-weight:600;font-size:.85rem}
+  .hist{font-size:.82rem;color:var(--muted);margin:10px 0}
+  .hist li{margin:2px 0}
+</style>
+<div class="lede">
+  <h1>Publish results</h1>
+  <p>Designate the current normalized ranking as {{ event.name }}'s official, publicly visible
+     result. Publishing signs a fresh reproducible run and appends a new, audited version — it never
+     overwrites a previous one.</p>
+</div>
+
+<div class="console">
+  <h2>Current official result</h2>
+  {% if current %}
+    <p>Version <b>{{ current.version }}</b>
+       <span class="badge {{ current.status }}">{{ current.status }}</span>
+       — run <span class="kv">{{ current.run_ext_id }}</span></p>
+    <p class="kv">result_hash {{ data.result_hash }}</p>
+    <p class="kv">fingerprint {{ data.fingerprint }} · audit seq {{ current.audit_seq }}</p>
+    <p><a href="{% url 'normalize:results' %}">View the public results page →</a></p>
+  {% else %}
+    <p class="notice" style="margin:0">Nothing published yet — no ranking is public for this event.</p>
+  {% endif %}
+</div>
+
+<div class="console">
+  <h2>Publish a new version</h2>
+  <p class="notice" style="margin:0 0 6px">This builds and signs a new run from the current ballots,
+     then publishes it as the next version. Use <b>provisional</b> for an in-progress ranking you may
+     supersede, <b>final</b> for the official outcome.</p>
+  <form class="stack" method="post" action="{% url 'normalize:results_publish' %}">
+    {% csrf_token %}
+    <label for="status">Status</label>
+    <select id="status" name="status">
+      <option value="final">final</option>
+      <option value="provisional">provisional</option>
+    </select>
+    <label for="note">Note (optional)</label>
+    <input id="note" name="note" maxlength="200" placeholder="e.g. Final results after judge review.">
+    <button type="submit">Sign &amp; publish</button>
+  </form>
+  <p class="notice" style="margin:6px 0 0">Preview first on the
+     <a href="{% url 'normalize:leaderboard' %}">organizer leaderboard →</a></p>
+</div>
+
+{% if history %}
+<div class="hist">
+  <b>Publication history</b> (append-only, newest first):
+  <ul>
+  {% for h in history %}
+    <li>v{{ h.version }} · {{ h.status }} · run {{ h.run_ext_id }} · audit seq {{ h.audit_seq }}
+        · {{ h.recorded_at|date:"Y-m-d H:i" }}{% if h.published_by %} · by {{ h.published_by }}{% endif %}{% if h.note %} — {{ h.note }}{% endif %}</li>
+  {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endblock %}

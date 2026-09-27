@@ -20,8 +20,8 @@ from events.models import Event, EventMembership, Team, Track
 from judging.models import Ballot, JudgeAssignment, RubricWeight
 from submissions.models import Submission
 
-from normalize import engine, runs, services, signing, verify
-from normalize.models import NormalizationRun
+from normalize import engine, results, runs, services, signing, verify
+from normalize.models import NormalizationRun, ResultPublication
 
 User = get_user_model()
 
@@ -253,4 +253,129 @@ class NormalizationRunTests(TestCase):
                 runs.publish_run(self.event, key=key, n_boot=120, seed=0)
         self.assertEqual(NormalizationRun.objects.count(), count0)   # no orphan run
         self.assertEqual(current_head().seq, head0)                  # and no orphan chain record
+
+
+class ResultPublicationTests(TestCase):
+    """W1 -- publishing a signed run as the event's official, PUBLIC result.
+
+    Reuses the perfectly-additive fixture (prj_a first) and asserts: a publish creates a versioned
+    ResultPublication + a co-committed `results.published` audit event and flips
+    Event.results_published; a second publish APPENDS v2 (never an update); the public results page
+    is empty until an organizer publishes (the W1 access property) and serves the frozen run result
+    after; the publish console is organizer-gated (401/403/200); an organizer POST publishes; and --
+    the killer -- if the publication INSERT fails, the run, BOTH audit events, and the flag ALL roll
+    back (no half-published event)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.event = Event.objects.create(
+            ext_id="evt_p", name="Publish Event", state=Event.CLOSED,
+            submissions_close=timezone.now() - timezone.timedelta(days=1))
+        track = Track.objects.create(ext_id="trk_p", event=cls.event, name="P")
+        team = Team.objects.create(ext_id="tm_p", event=cls.event, name="Team")
+        for c in engine.CRITERIA:
+            RubricWeight.objects.create(event=cls.event, criterion=c, weight=1.0)
+        subs = {}
+        for sid in ("prj_a", "prj_b", "prj_c"):
+            subs[sid] = Submission.objects.create(
+                ext_id=sid, event=cls.event, team=team, track=track,
+                title="Title %s" % sid, state=Submission.SUBMITTED)
+        base = {"prj_a": 4, "prj_b": 3, "prj_c": 2}
+        bias = [0, 1, -1]
+        for n in range(3):
+            u = User.objects.create_user(email="pjudge%d@t.demo" % n, display_name="PJ%d" % n)
+            m = EventMembership.objects.create(
+                user=u, event=cls.event, role=EventMembership.JUDGE, ext_id="jdg_p%d" % n)
+            for sid, sub in subs.items():
+                a = JudgeAssignment.objects.create(judge=m, submission=sub)
+                v = base[sid] + bias[n]
+                Ballot.objects.create(assignment=a, functionality=v, quality=v, innovation=v)
+        cls.org = User.objects.create_user(email="porg@t.demo", display_name="POrg")
+        EventMembership.objects.create(user=cls.org, event=cls.event,
+                                       role=EventMembership.ORGANIZER)
+        cls.participant = User.objects.create_user(email="ppart@t.demo", display_name="PPart")
+        EventMembership.objects.create(user=cls.participant, event=cls.event,
+                                       role=EventMembership.PARTICIPANT)
+
+    def _key(self):
+        from audit import receipts
+        return receipts.generate_private_key()
+
+    def test_publish_creates_version_flips_flag_and_audits(self):
+        key = self._key()
+        head0 = current_head().seq
+        self.assertFalse(Event.objects.get(pk=self.event.pk).results_published)
+        pub, run = results.publish_results(self.event, key=key, note="n", n_boot=120, seed=0)
+        self.assertEqual(pub.version, 1)
+        self.assertEqual(pub.status, ResultPublication.FINAL)
+        self.assertEqual(pub.run_ext_id, run.run_ext_id)
+        # results.published co-committed AFTER normalization.published: head advanced by exactly two.
+        self.assertEqual(current_head().seq, head0 + 2)
+        ev = AuditEvent.objects.get(seq=pub.audit_seq)
+        self.assertEqual(ev.event_type, "results.published")
+        self.assertEqual(ev.payload["result_hash"], run.result_hash)
+        self.assertEqual(ev.payload["version"], 1)
+        self.assertTrue(Event.objects.get(pk=self.event.pk).results_published)
+        data = results.current_results(self.event)
+        self.assertTrue(data["published"])
+        self.assertEqual(data["result"]["rows"][0]["submission"], "prj_a")
+        self.assertEqual(data["result_hash"], run.result_hash)
+
+    def test_second_publish_appends_next_version(self):
+        key = self._key()
+        p1, _ = results.publish_results(self.event, key=key, n_boot=120, seed=0)
+        p2, _ = results.publish_results(self.event, key=key,
+                                        status=ResultPublication.PROVISIONAL, n_boot=120, seed=0)
+        self.assertEqual((p1.version, p2.version), (1, 2))
+        self.assertEqual(results.current_publication(self.event).version, 2)
+        self.assertEqual(len(results.publication_history(self.event)), 2)
+
+    def test_public_results_private_until_published(self):
+        c = Client()
+        before = c.get("/normalize/results")
+        self.assertEqual(before.status_code, 200)              # public route, never gated
+        self.assertTemplateUsed(before, "normalize/results.html")
+        self.assertFalse(c.get("/normalize/results.json").json()["published"])
+        results.publish_results(self.event, key=self._key(), n_boot=120, seed=0)
+        after = c.get("/normalize/results.json").json()
+        self.assertTrue(after["published"])
+        self.assertEqual(after["result"]["rows"][0]["submission"], "prj_a")
+
+    def test_publish_console_is_organizer_gated(self):
+        anon = Client()
+        self.assertEqual(anon.get("/normalize/results/publish").status_code, 401)
+        part = Client()
+        part.force_login(self.participant)
+        self.assertEqual(part.get("/normalize/results/publish").status_code, 403)
+        org = Client()
+        org.force_login(self.org)
+        ok = org.get("/normalize/results/publish")
+        self.assertEqual(ok.status_code, 200)
+        self.assertTemplateUsed(ok, "normalize/results_publish.html")
+
+    def test_organizer_post_publishes(self):
+        from unittest import mock
+        org = Client()
+        org.force_login(self.org)
+        with mock.patch("normalize.views.keys.ensure_private_key",
+                        return_value=(self._key(), False)):
+            resp = org.post("/normalize/results/publish", {"status": "final", "note": "Final."})
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(ResultPublication.objects.filter(event_ext_id="evt_p").count(), 1)
+        self.assertTrue(Event.objects.get(pk=self.event.pk).results_published)
+
+    def test_publication_insert_failure_rolls_back_everything(self):
+        from unittest import mock
+        key = self._key()
+        head0 = current_head().seq
+        runs0 = NormalizationRun.objects.count()
+        with mock.patch.object(ResultPublication.objects, "create",
+                               side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                results.publish_results(self.event, key=key, n_boot=120, seed=0)
+        self.assertEqual(NormalizationRun.objects.count(), runs0)      # run rolled back
+        self.assertEqual(ResultPublication.objects.count(), 0)         # no publication
+        self.assertEqual(current_head().seq, head0)                    # both audit events rolled back
+        self.assertFalse(Event.objects.get(pk=self.event.pk).results_published)
+
 
