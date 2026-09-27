@@ -6,6 +6,8 @@ record_ballot, and "who may read a ballot" is decided by ASSIGNMENT OWNERSHIP, n
 URL parameter. Checks 4/5/6 are the same endpoint differing only by caller identity, so the
 ownership rule must be a property of the data layer.
 """
+import math
+
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Max
@@ -13,10 +15,14 @@ from django.db.models import Max
 from events.models import EventMembership
 
 from audit import service as audit_service
+from submissions.models import Submission
 
-from .models import Ballot, BallotRevision, JudgeAssignment
+from .models import Ballot, BallotRevision, JudgeAssignment, RubricWeight
 
 SCORE_MIN, SCORE_MAX = 1, 5
+# Rubric criteria in engine.CRITERIA order. Declared here (not imported from normalize) so the
+# dependency arrow stays judging -> (events, submissions, audit); normalize depends on judging.
+CRITERIA = ("functionality", "quality", "innovation")
 
 
 def judge_membership(user, event):
@@ -147,3 +153,202 @@ def export_event_rows(event):
             b.assignment.judge.ext_id,
             b.functionality, b.quality, b.innovation, b.comment)])
     return rows
+
+
+# --- Organizer control room -------------------------------------------------------------------
+# Organizer-scoped, event-scoped helpers behind /judging/<event>/... : judging-progress coverage
+# (read-only), judge-assignment management, and rubric-weight configuration. None sit on the
+# acceptance checker's five flat routes, and none add a model or field, so they need no migration
+# and cannot move replay 7/7. Every WRITE is atomic and co-commits an audit event, exactly like
+# record_ballot and events.services -- extending the tamper-evident trail to judging configuration.
+
+
+def event_judges(event):
+    """JUDGE memberships for this event, ext_id-ordered (stable, legible order for the UI)."""
+    return list(EventMembership.objects.filter(event=event, role=EventMembership.JUDGE)
+                .select_related("user").order_by("ext_id", "id"))
+
+
+def event_submissions(event):
+    """Submissions for this event, oldest-first (prj_01, prj_02, ...)."""
+    return list(Submission.objects.filter(event=event)
+                .select_related("track", "team").order_by("id"))
+
+
+def _scored_assignment_ids(event):
+    """The set of JudgeAssignment ids that already carry a Ballot (a recorded score)."""
+    return set(Ballot.objects
+               .filter(assignment__submission__event=event)
+               .values_list("assignment_id", flat=True))
+# SENTINEL_CONTROL_ROOM
+
+
+def judging_progress(event):
+    """Read-only coverage snapshot for the organizer: per-judge and per-submission
+    assigned/scored/pending counts, each submission's assigned judges (with a scored flag), and
+    event totals. Pure ORM aggregation over existing rows -- it writes nothing and touches no
+    checker route."""
+    judges = event_judges(event)
+    submissions = event_submissions(event)
+    assignments = list(JudgeAssignment.objects
+                       .filter(submission__event=event)
+                       .select_related("judge", "submission"))
+    scored_ids = _scored_assignment_ids(event)
+
+    by_judge = {m.id: {"judge": m, "assigned": 0, "scored": 0} for m in judges}
+    by_sub = {s.id: {"submission": s, "assigned": 0, "scored": 0,
+                     "judges": [], "pending_judges": []} for s in submissions}
+    for a in assignments:
+        scored = a.id in scored_ids
+        jext = a.judge.ext_id or str(a.judge_id)
+        jrow = by_judge.get(a.judge_id)
+        if jrow is not None:
+            jrow["assigned"] += 1
+            jrow["scored"] += 1 if scored else 0
+        srow = by_sub.get(a.submission_id)
+        if srow is not None:
+            srow["assigned"] += 1
+            srow["judges"].append({"ext_id": jext, "scored": scored})
+            if scored:
+                srow["scored"] += 1
+            else:
+                srow["pending_judges"].append(jext)
+
+    judge_rows = []
+    for m in judges:
+        d = by_judge[m.id]
+        d["pending"] = d["assigned"] - d["scored"]
+        judge_rows.append(d)
+    sub_rows = []
+    for s in submissions:
+        d = by_sub[s.id]
+        d["pending"] = d["assigned"] - d["scored"]
+        d["status"] = ("uncovered" if d["assigned"] == 0
+                       else "complete" if d["scored"] >= d["assigned"] else "partial")
+        sub_rows.append(d)
+
+    n_assign = len(assignments)
+    n_scored = len(scored_ids)
+    return {
+        "event": event, "judge_rows": judge_rows, "sub_rows": sub_rows,
+        "totals": {
+            "judges": len(judges), "submissions": len(submissions),
+            "assignments": n_assign, "scored": n_scored, "pending": n_assign - n_scored,
+            "uncovered": sum(1 for d in sub_rows if d["status"] == "uncovered"),
+            "complete": sum(1 for d in sub_rows if d["status"] == "complete"),
+            "pct_scored": round(100.0 * n_scored / n_assign, 1) if n_assign else 0.0,
+        },
+    }
+# SENTINEL_CONTROL_ROOM_2
+
+
+def _judge_membership_in_event(event, judge_ext_id):
+    """A JUDGE membership of THIS event by ext_id, or None. Scoping is a DB fact, never trusted
+    from the form: a judge ext_id from another event simply does not match this filter."""
+    if not judge_ext_id:
+        return None
+    return (EventMembership.objects
+            .filter(event=event, role=EventMembership.JUDGE, ext_id=judge_ext_id)
+            .select_related("user").first())
+
+
+def assign_judge(actor, event, *, judge_ext_id, submission_ext_id):
+    """Assign a judge (by membership ext_id) to a submission, both scoped to `event`. Atomic +
+    audited ('judge.assigned'). Idempotent via get_or_create: re-assigning an existing pair writes
+    nothing and emits no second audit event, so a double-submit never trips uniq_judge_submission."""
+    membership = _judge_membership_in_event(event, judge_ext_id)
+    if membership is None:
+        raise ValidationError("Select a judge of this event.")
+    submission = Submission.objects.filter(event=event, ext_id=submission_ext_id or "").first()
+    if submission is None:
+        raise ValidationError("Select a submission of this event.")
+    with transaction.atomic():
+        assignment, created = JudgeAssignment.objects.get_or_create(
+            judge=membership, submission=submission)
+        if created:
+            audit_service.record_event(
+                event_type="judge.assigned", object_type="judge_assignment",
+                object_id="%s:%s" % (membership.ext_id or membership.pk, submission.ext_id),
+                actor_user_id=getattr(actor, "pk", ""),
+                payload={"event": event.ext_id, "judge": membership.ext_id,
+                         "submission": submission.ext_id})
+    return assignment
+
+
+def unassign_judge(actor, event, *, judge_ext_id, submission_ext_id):
+    """Remove an assignment ONLY if no score exists for it. A scored assignment is permanent: its
+    Ballot and append-only BallotRevision history (and the audit events referencing them) must
+    never be cascade-deleted, so we refuse rather than destroy history. Atomic + audited
+    ('judge.unassigned').
+
+    The has-ballot check and the delete are ONE serialized step: we lock the assignment row
+    FOR UPDATE (of=self) before checking. A concurrent first-ever record_ballot inserts a Ballot
+    that takes an FK KEY SHARE lock on this same row, which conflicts with our FOR UPDATE -- so
+    either it waits and we then see its ballot and refuse, or we delete first and its insert fails
+    the foreign key. A score can never slip in between our check and our delete and be cascaded away.
+    """
+    membership = _judge_membership_in_event(event, judge_ext_id)
+    if membership is None:
+        raise ValidationError("Unknown judge for this event.")
+    with transaction.atomic():
+        assignment = (JudgeAssignment.objects
+                      .select_for_update(of=("self",))
+                      .filter(judge=membership, submission__event=event,
+                              submission__ext_id=submission_ext_id or "")
+                      .select_related("submission").first())
+        if assignment is None:
+            raise ValidationError("That assignment does not exist.")
+        if Ballot.objects.filter(assignment=assignment).exists():
+            raise ValidationError(
+                "This judge has already scored that submission; a scored assignment cannot be "
+                "removed because its score history is append-only.")
+        sub_ext = assignment.submission.ext_id
+        assignment.delete()
+        audit_service.record_event(
+            event_type="judge.unassigned", object_type="judge_assignment",
+            object_id="%s:%s" % (membership.ext_id or membership.pk, sub_ext),
+            actor_user_id=getattr(actor, "pk", ""),
+            payload={"event": event.ext_id, "judge": membership.ext_id, "submission": sub_ext})
+# SENTINEL_CONTROL_ROOM_3
+
+
+def current_weights(event):
+    """criterion -> weight from the DB (missing => 1.0), in CRITERIA order. Mirrors
+    normalize.services.rubric_weights so the editor and the engine agree on the equal-weight
+    default; read-only."""
+    rows = {rw.criterion: float(rw.weight) for rw in RubricWeight.objects.filter(event=event)}
+    return {c: rows.get(c, 1.0) for c in CRITERIA}
+
+
+def set_rubric_weights(actor, event, *, weights):
+    """Set the event's per-criterion rubric weights (organizer-only). Each must be a finite number
+    >= 0 and their sum must be > 0 (the engine's composite divides by that sum). Atomic + audited
+    ('rubric.reweighted', old -> new).
+
+    Scope of effect (honest): weights are read LIVE only by the organizer leaderboard PREVIEW (the
+    in-waiting ranking) and by the NEXT signed run you publish. Official published results are a
+    frozen, signed run that pins the exact weights and ballots it consumed; the public results view
+    serves that frozen result verbatim and the offline verifier recomputes from the pinned weights,
+    not the live ones. So re-weighting can never invalidate a result you have already published.
+    """
+    old = current_weights(event)
+    clean = {}
+    for c in CRITERIA:
+        try:
+            val = float(weights.get(c, ""))
+        except (TypeError, ValueError):
+            raise ValidationError("%s weight must be a number." % c)
+        if not math.isfinite(val) or val < 0:
+            raise ValidationError("%s weight must be zero or a positive number." % c)
+        clean[c] = val
+    if sum(clean.values()) <= 0:
+        raise ValidationError("At least one weight must be greater than zero.")
+    with transaction.atomic():
+        for c in CRITERIA:
+            RubricWeight.objects.update_or_create(
+                event=event, criterion=c, defaults={"weight": clean[c]})
+        audit_service.record_event(
+            event_type="rubric.reweighted", object_type="event", object_id=event.ext_id,
+            actor_user_id=getattr(actor, "pk", ""),
+            payload={"event": event.ext_id, "old": old, "new": clean})
+    return clean

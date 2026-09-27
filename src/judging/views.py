@@ -14,11 +14,12 @@ from django.conf import settings
 from django.contrib.auth.views import redirect_to_login
 from django.core.exceptions import ValidationError
 from django.http import HttpResponse, JsonResponse
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_GET, require_http_methods
 
 from events.models import Event, EventMembership
+from events import services as events_services
 
 from portal import ratelimit
 
@@ -27,6 +28,24 @@ from . import services
 
 def _current_event():
     return Event.objects.order_by("id").first()
+
+
+# ?ok=<key> after a PRG redirect -> a human confirmation banner on the target page.
+_NOTICES = {"assigned": "Judge assigned.", "unassigned": "Assignment removed.",
+            "rubric": "Rubric weights updated."}
+
+
+def _organizer_event_or_response(request, ext_id):
+    """Resolve the event and enforce organizer-of-this-event; return (event, None) or
+    (None, response). Anonymous -> login page (this is a browser tool for people); unknown
+    event -> 404; authenticated non-organizer -> plain 403. Mirrors events.views so the
+    /judging/<event>/... control room guards exactly like the events organizer UI."""
+    if not request.user.is_authenticated:
+        return None, redirect_to_login(request.get_full_path(), settings.LOGIN_URL)
+    event = get_object_or_404(Event, ext_id=ext_id)
+    if not events_services.is_organizer(request.user, event):
+        return None, HttpResponse("organizers only", status=403)
+    return event, None
 
 
 @require_GET
@@ -135,3 +154,90 @@ def score(request):
         return _render({"error": " ".join(e.messages)}, status=400)
     # Post/redirect/get: a refresh must not silently re-record a ballot.
     return redirect("%s?saved=%s" % (reverse("judging:score"), assignment.submission.ext_id))
+
+
+# --- Organizer control room: judging progress, assignments, rubric weights --------------------
+# All organizer-only + event-scoped, all under the /judging/ include, none on the checker's five
+# flat routes. base.html is untouched, so /projects and /projects/new stay byte-identical and
+# replay stays 7/7. No new model/field -> no migration.
+
+
+@require_GET
+def progress(request, ext_id):
+    """Read-only judging coverage: assigned/scored/pending per judge and per submission."""
+    event, resp = _organizer_event_or_response(request, ext_id)
+    if resp is not None:
+        return resp
+    ctx = services.judging_progress(event)
+    ctx["notice"] = _NOTICES.get(request.GET.get("ok", ""), "")
+    return render(request, "judging/progress.html", ctx)
+
+
+def _assignments_context(event, **extra):
+    ctx = {"event": event, "judges": services.event_judges(event),
+           "progress": services.judging_progress(event), "notice": "", "error": ""}
+    ctx.update(extra)
+    return ctx
+
+
+@require_GET
+def assignments(request, ext_id):
+    """List current assignments (with a per-judge scored flag) and offer assign/remove."""
+    event, resp = _organizer_event_or_response(request, ext_id)
+    if resp is not None:
+        return resp
+    return render(request, "judging/assignments.html",
+                  _assignments_context(event, notice=_NOTICES.get(request.GET.get("ok", ""), "")))
+
+
+@require_http_methods(["POST"])
+def assign(request, ext_id):
+    event, resp = _organizer_event_or_response(request, ext_id)
+    if resp is not None:
+        return resp
+    try:
+        services.assign_judge(request.user, event,
+                              judge_ext_id=request.POST.get("judge", ""),
+                              submission_ext_id=request.POST.get("submission", ""))
+    except ValidationError as e:
+        return render(request, "judging/assignments.html",
+                      _assignments_context(event, error=" ".join(e.messages)), status=400)
+    return redirect("%s?ok=assigned" % reverse("judging:assignments", args=[event.ext_id]))
+
+
+@require_http_methods(["POST"])
+def unassign(request, ext_id):
+    event, resp = _organizer_event_or_response(request, ext_id)
+    if resp is not None:
+        return resp
+    try:
+        services.unassign_judge(request.user, event,
+                                judge_ext_id=request.POST.get("judge", ""),
+                                submission_ext_id=request.POST.get("submission", ""))
+    except ValidationError as e:
+        return render(request, "judging/assignments.html",
+                      _assignments_context(event, error=" ".join(e.messages)), status=400)
+    return redirect("%s?ok=unassigned" % reverse("judging:assignments", args=[event.ext_id]))
+
+
+@require_http_methods(["GET", "POST"])
+def rubric(request, ext_id):
+    """Organizer edits the per-criterion rubric weights that feed the normalized score."""
+    event, resp = _organizer_event_or_response(request, ext_id)
+    if resp is not None:
+        return resp
+    if request.method == "POST":
+        try:
+            services.set_rubric_weights(
+                request.user, event,
+                weights={c: request.POST.get(c, "") for c in services.CRITERIA})
+        except ValidationError as e:
+            reflected = {c: request.POST.get(c, "") for c in services.CRITERIA}
+            return render(request, "judging/rubric.html",
+                          {"event": event, "weights": reflected, "criteria": services.CRITERIA,
+                           "error": " ".join(e.messages), "notice": ""}, status=400)
+        return redirect("%s?ok=rubric" % reverse("judging:rubric", args=[event.ext_id]))
+    return render(request, "judging/rubric.html",
+                  {"event": event, "weights": services.current_weights(event),
+                   "criteria": services.CRITERIA,
+                   "notice": _NOTICES.get(request.GET.get("ok", ""), ""), "error": ""})

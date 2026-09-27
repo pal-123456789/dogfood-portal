@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Assignments — {{ event.name }} — dogfood portal{% endblock %}
+{% block content %}
+<div class="lede">
+  <h1>Judge assignments</h1>
+  <p><code>{{ event.ext_id }}</code> · assign submissions to judges. A judge scores only what they are assigned.</p>
+</div>
+
+{% if error %}<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">{{ error }}</div>{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+
+<h3>Add an assignment</h3>
+{% if judges and progress.sub_rows %}
+<form class="stack" method="post" action="{% url 'judging:assign' event.ext_id %}">
+  {% csrf_token %}
+  <label>Judge
+    <select name="judge">{% for m in judges %}<option value="{{ m.ext_id }}">{{ m.ext_id }}</option>{% endfor %}</select>
+  </label>
+  <label>Submission
+    <select name="submission">{% for row in progress.sub_rows %}<option value="{{ row.submission.ext_id }}">{{ row.submission.ext_id }} — {{ row.submission.title }}</option>{% endfor %}</select>
+  </label>
+  <button type="submit">Assign</button>
+</form>
+{% else %}
+<p class="empty">You need at least one judge and one submission before assigning. Judges are event members with the judge role.</p>
+{% endif %}
+
+<h3>Current assignments</h3>
+{% if progress.totals.assignments %}
+{% for row in progress.sub_rows %}{% if row.assigned %}
+<div class="card" style="margin-bottom:12px">
+  <h3>{{ row.submission.title }} <span class="mono" style="font-size:.7em;color:var(--muted)">{{ row.submission.ext_id }}</span></h3>
+  <p class="sum">{{ row.scored }}/{{ row.assigned }} scored.</p>
+  <div class="filters">
+    {% for j in row.judges %}<span class="chip">{{ j.ext_id }}{% if j.scored %} · scored{% endif %}</span>{% endfor %}
+  </div>
+  <div style="margin-top:6px">
+    {% for j in row.judges %}{% if not j.scored %}
+    <form method="post" action="{% url 'judging:unassign' event.ext_id %}" style="display:inline-block;margin:0 8px 6px 0">
+      {% csrf_token %}
+      <input type="hidden" name="judge" value="{{ j.ext_id }}">
+      <input type="hidden" name="submission" value="{{ row.submission.ext_id }}">
+      <button type="submit" style="margin:0;padding:4px 10px;background:#8a2b2b;font-size:.8rem">remove {{ j.ext_id }}</button>
+    </form>
+    {% endif %}{% endfor %}
+  </div>
+</div>
+{% endif %}{% endfor %}
+{% else %}<p class="empty">No assignments yet.</p>{% endif %}
+
+<p style="margin-top:20px"><a href="{% url 'judging:progress' event.ext_id %}">← judging progress</a></p>
+{% endblock %}

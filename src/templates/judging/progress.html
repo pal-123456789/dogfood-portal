@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Judging progress — {{ event.name }} — dogfood portal{% endblock %}
+{% block content %}
+<div class="lede">
+  <h1>Judging progress</h1>
+  <p><code>{{ event.ext_id }}</code> · {{ totals.assignments }} assignment{{ totals.assignments|pluralize }} ·
+     {{ totals.scored }} scored · {{ totals.pending }} pending · {{ totals.pct_scored }}% complete</p>
+</div>
+
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+
+<div class="filters">
+  <span class="chip">{{ totals.judges }} judge{{ totals.judges|pluralize }}</span>
+  <span class="chip">{{ totals.submissions }} submission{{ totals.submissions|pluralize }}</span>
+  <span class="chip{% if totals.uncovered %} on{% endif %}">{{ totals.uncovered }} uncovered</span>
+  <span class="chip">{{ totals.complete }} fully scored</span>
+</div>
+
+<h3>By submission</h3>
+{% if sub_rows %}
+<div class="grid">
+  {% for row in sub_rows %}
+  <div class="card">
+    <h3>{{ row.submission.title }}</h3>
+    <div class="meta">
+      <span class="tag">{{ row.submission.track.ext_id }}</span>
+      <span class="tag">{{ row.submission.ext_id }}</span>
+      <span class="tag">{{ row.status }}</span>
+    </div>
+    <p class="sum" style="margin-top:10px">{{ row.scored }}/{{ row.assigned }} scored{% if row.pending_judges %} ·
+      pending {% for j in row.pending_judges %}<span class="mono">{{ j }}</span>{% if not forloop.last %}, {% endif %}{% endfor %}{% endif %}</p>
+  </div>
+  {% endfor %}
+</div>
+{% else %}<p class="empty">No submissions yet.</p>{% endif %}
+
+<h3>By judge</h3>
+{% if judge_rows %}
+<div class="grid">
+  {% for row in judge_rows %}
+  <div class="card">
+    <h3 class="mono">{{ row.judge.ext_id }}</h3>
+    <p class="sum">{{ row.scored }}/{{ row.assigned }} scored · {{ row.pending }} pending</p>
+  </div>
+  {% endfor %}
+</div>
+{% else %}<p class="empty">No judges yet. Add judges to this event, then assign submissions.</p>{% endif %}
+
+<p style="margin-top:24px">
+  <a href="{% url 'judging:assignments' event.ext_id %}">Manage assignments →</a>&nbsp;&nbsp;
+  <a href="{% url 'judging:rubric' event.ext_id %}">Rubric weights →</a>&nbsp;&nbsp;
+  <a href="{% url 'events:detail' event.ext_id %}">← event</a>
+</p>
+{% endblock %}

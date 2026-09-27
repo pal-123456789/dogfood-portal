@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Rubric weights — {{ event.name }} — dogfood portal{% endblock %}
+{% block content %}
+<div class="lede">
+  <h1>Rubric weights</h1>
+  <p><code>{{ event.ext_id }}</code> · weight each criterion in the normalized score. Equal weights = a plain average.</p>
+</div>
+
+{% if error %}<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">{{ error }}</div>{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+
+<form class="stack" method="post" action="{% url 'judging:rubric' event.ext_id %}">
+  {% csrf_token %}
+  <label>Functionality weight<input type="number" name="functionality" value="{{ weights.functionality }}" step="0.1" min="0" required></label>
+  <label>Quality weight<input type="number" name="quality" value="{{ weights.quality }}" step="0.1" min="0" required></label>
+  <label>Innovation weight<input type="number" name="innovation" value="{{ weights.innovation }}" step="0.1" min="0" required></label>
+  <button type="submit">Save weights</button>
+</form>
+
+<p class="notice">These weights are read live only by the organizer <strong>leaderboard preview</strong>
+  (the ranking-in-waiting). Official <strong>published results</strong> are a frozen, signed run that
+  pins the exact weights and ballots it used — the public results page serves that frozen run verbatim
+  and the offline verifier recomputes from those pinned weights. So re-weighting changes the preview
+  and the next run you publish; it never alters a result you have already published.</p>
+
+<p style="margin-top:20px"><a href="{% url 'judging:progress' event.ext_id %}">← judging progress</a></p>
+{% endblock %}

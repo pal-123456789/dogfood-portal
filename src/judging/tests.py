@@ -12,6 +12,7 @@ from datetime import timedelta
 
 from django.db import IntegrityError, transaction
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -185,3 +186,165 @@ class ScoreEndpointTests(TestCase):
         resp = self._post()                                           # 3rd -> over
         self.assertEqual(resp.status_code, 429)
         self.assertIn("Retry-After", resp)
+
+
+class ControlRoomTests(TestCase):
+    """Organizer control room: judging-progress coverage (#48), judge-assignment management
+    (#39, append-only-safe removal), and rubric-weight configuration (#41). All event-scoped,
+    organizer-only, no migration."""
+
+    def setUp(self):
+        self.event = Event.objects.create(ext_id="evt_cr", name="CR", state=Event.OPEN,
+                                           submissions_close=timezone.now() + timedelta(days=1))
+        self.other = Event.objects.create(ext_id="evt_other", name="Other", state=Event.OPEN,
+                                           submissions_close=timezone.now() + timedelta(days=1))
+        self.trk = Track.objects.create(ext_id="trk_cr", event=self.event, name="Main")
+        self.tm = Team.objects.create(ext_id="tm_cr", event=self.event, name="Team")
+        self.sub1 = Submission.objects.create(ext_id="prj_cr1", event=self.event, team=self.tm,
+                                              track=self.trk, title="One",
+                                              state=Submission.SUBMITTED)
+        self.sub2 = Submission.objects.create(ext_id="prj_cr2", event=self.event, team=self.tm,
+                                              track=self.trk, title="Two",
+                                              state=Submission.SUBMITTED)
+        self.sub3 = Submission.objects.create(ext_id="prj_cr3", event=self.event, team=self.tm,
+                                              track=self.trk, title="Three",
+                                              state=Submission.SUBMITTED)
+        otrk = Track.objects.create(ext_id="trk_o", event=self.other, name="O")
+        otm = Team.objects.create(ext_id="tm_o", event=self.other, name="O")
+        self.foreign_sub = Submission.objects.create(ext_id="prj_o", event=self.other, team=otm,
+                                                     track=otrk, title="Foreign",
+                                                     state=Submission.SUBMITTED)
+        self.org_u = User.objects.create_user(email="org@x.com", password="x")
+        self.j1_u = User.objects.create_user(email="j1@x.com", password="x")
+        self.j2_u = User.objects.create_user(email="j2@x.com", password="x")
+        self.outsider = User.objects.create_user(email="p@x.com", password="x")
+        EventMembership.objects.create(user=self.org_u, event=self.event,
+                                       role=EventMembership.ORGANIZER, ext_id="org_cr")
+        self.j1 = EventMembership.objects.create(user=self.j1_u, event=self.event,
+                                                 role=EventMembership.JUDGE, ext_id="jdg_1")
+        self.j2 = EventMembership.objects.create(user=self.j2_u, event=self.event,
+                                                 role=EventMembership.JUDGE, ext_id="jdg_2")
+        self.part = EventMembership.objects.create(user=self.outsider, event=self.event,
+                                                   role=EventMembership.PARTICIPANT, ext_id="ptx_1")
+    # SENTINEL_CR_TESTS
+
+    # ---- #48 progress ----
+    def test_progress_counts_and_status(self):
+        services.assign_judge(self.org_u, self.event, judge_ext_id="jdg_1",
+                              submission_ext_id="prj_cr1")
+        services.assign_judge(self.org_u, self.event, judge_ext_id="jdg_2",
+                              submission_ext_id="prj_cr1")
+        services.assign_judge(self.org_u, self.event, judge_ext_id="jdg_1",
+                              submission_ext_id="prj_cr2")
+        # jdg_1 scores prj_cr1 -> that assignment is "scored"
+        services.record_ballot(self.j1, self.sub1, functionality=4, quality=4, innovation=4)
+        prog = services.judging_progress(self.event)
+        self.assertEqual(prog["totals"]["assignments"], 3)
+        self.assertEqual(prog["totals"]["scored"], 1)
+        self.assertEqual(prog["totals"]["pending"], 2)
+        rows = {r["submission"].ext_id: r for r in prog["sub_rows"]}
+        self.assertEqual((rows["prj_cr1"]["assigned"], rows["prj_cr1"]["scored"]), (2, 1))
+        self.assertEqual(rows["prj_cr1"]["status"], "partial")
+        self.assertEqual(rows["prj_cr3"]["status"], "uncovered")   # never assigned
+        jrows = {r["judge"].ext_id: r for r in prog["judge_rows"]}
+        self.assertEqual((jrows["jdg_1"]["assigned"], jrows["jdg_1"]["scored"]), (2, 1))
+        self.assertEqual(jrows["jdg_2"]["pending"], 1)
+
+    # ---- #39 assignment management ----
+    def test_assign_creates_and_audits_and_is_idempotent(self):
+        services.assign_judge(self.org_u, self.event, judge_ext_id="jdg_1",
+                              submission_ext_id="prj_cr1")
+        self.assertTrue(JudgeAssignment.objects.filter(
+            judge=self.j1, submission=self.sub1).exists())
+        self.assertEqual(AuditEvent.objects.filter(event_type="judge.assigned").count(), 1)
+        # second identical assign: no new row, no new audit event
+        services.assign_judge(self.org_u, self.event, judge_ext_id="jdg_1",
+                              submission_ext_id="prj_cr1")
+        self.assertEqual(JudgeAssignment.objects.filter(
+            judge=self.j1, submission=self.sub1).count(), 1)
+        self.assertEqual(AuditEvent.objects.filter(event_type="judge.assigned").count(), 1)
+
+    def test_assign_rejects_non_judge_and_foreign_submission(self):
+        with self.assertRaises(ValidationError):        # participant, not a judge
+            services.assign_judge(self.org_u, self.event, judge_ext_id="ptx_1",
+                                  submission_ext_id="prj_cr1")
+        with self.assertRaises(ValidationError):        # submission from another event
+            services.assign_judge(self.org_u, self.event, judge_ext_id="jdg_1",
+                                  submission_ext_id="prj_o")
+        self.assertEqual(JudgeAssignment.objects.count(), 0)
+    # SENTINEL_CR_TESTS_2
+
+    def test_unassign_unscored_ok_scored_blocked(self):
+        services.assign_judge(self.org_u, self.event, judge_ext_id="jdg_1",
+                              submission_ext_id="prj_cr1")
+        services.assign_judge(self.org_u, self.event, judge_ext_id="jdg_2",
+                              submission_ext_id="prj_cr1")
+        # jdg_2 scores -> its assignment becomes permanent (append-only history)
+        services.record_ballot(self.j2, self.sub1, functionality=3, quality=3, innovation=3)
+        # jdg_1 (unscored) can be removed
+        services.unassign_judge(self.org_u, self.event, judge_ext_id="jdg_1",
+                                submission_ext_id="prj_cr1")
+        self.assertFalse(JudgeAssignment.objects.filter(
+            judge=self.j1, submission=self.sub1).exists())
+        self.assertEqual(AuditEvent.objects.filter(event_type="judge.unassigned").count(), 1)
+        # jdg_2 (scored) cannot -- and its ballot + revision survive intact
+        with self.assertRaises(ValidationError):
+            services.unassign_judge(self.org_u, self.event, judge_ext_id="jdg_2",
+                                    submission_ext_id="prj_cr1")
+        scored = JudgeAssignment.objects.get(judge=self.j2, submission=self.sub1)
+        self.assertTrue(Ballot.objects.filter(assignment=scored).exists())
+        self.assertEqual(BallotRevision.objects.filter(ballot__assignment=scored).count(), 1)
+
+    def test_admin_delete_guard_on_scored_assignment(self):
+        # The permanence rule holds in Django admin too, not just the control-room path: a scored
+        # assignment cannot be deleted (even by a superuser), an unscored one still can, and the
+        # bulk "delete selected" action is removed so it cannot bypass the per-object check.
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+        from judging.admin import JudgeAssignmentAdmin
+        services.assign_judge(self.org_u, self.event, judge_ext_id="jdg_1",
+                              submission_ext_id="prj_cr1")
+        services.assign_judge(self.org_u, self.event, judge_ext_id="jdg_2",
+                              submission_ext_id="prj_cr2")
+        services.record_ballot(self.j1, self.sub1, functionality=4, quality=4, innovation=4)
+        scored = JudgeAssignment.objects.get(judge=self.j1, submission=self.sub1)
+        unscored = JudgeAssignment.objects.get(judge=self.j2, submission=self.sub2)
+        self.org_u.is_staff = self.org_u.is_superuser = True
+        self.org_u.save()
+        ma = JudgeAssignmentAdmin(JudgeAssignment, AdminSite())
+        req = RequestFactory().get("/admin/")
+        req.user = self.org_u
+        self.assertFalse(ma.has_delete_permission(req, scored))   # scored: permanent, even for admin
+        self.assertTrue(ma.has_delete_permission(req, unscored))  # unscored: still removable
+        self.assertNotIn("delete_selected", ma.get_actions(req))  # bulk delete path removed
+
+    # ---- #41 rubric weights ----
+    def test_set_rubric_weights_and_audit(self):
+        clean = services.set_rubric_weights(self.org_u, self.event,
+                                            weights={"functionality": "2", "quality": "1",
+                                                     "innovation": "0.5"})
+        self.assertEqual(clean, {"functionality": 2.0, "quality": 1.0, "innovation": 0.5})
+        self.assertEqual(services.current_weights(self.event),
+                         {"functionality": 2.0, "quality": 1.0, "innovation": 0.5})
+        self.assertEqual(AuditEvent.objects.filter(event_type="rubric.reweighted").count(), 1)
+
+    def test_rubric_weights_reject_invalid_writing_nothing(self):
+        for bad in ({"functionality": "0", "quality": "0", "innovation": "0"},   # sum zero
+                    {"functionality": "-1", "quality": "1", "innovation": "1"},  # negative
+                    {"functionality": "abc", "quality": "1", "innovation": "1"}):  # non-number
+            with self.assertRaises(ValidationError):
+                services.set_rubric_weights(self.org_u, self.event, weights=bad)
+        from judging.models import RubricWeight
+        self.assertEqual(RubricWeight.objects.filter(event=self.event).count(), 0)
+        self.assertEqual(AuditEvent.objects.filter(event_type="rubric.reweighted").count(), 0)
+
+    # ---- organizer guard (HTTP) ----
+    def test_organizer_guard_on_progress(self):
+        url = reverse("judging:progress", args=["evt_cr"])
+        r_anon = self.client.get(url)
+        self.assertEqual(r_anon.status_code, 302)
+        self.assertTrue(r_anon["Location"].startswith("/accounts/login/"))
+        self.client.force_login(self.outsider)
+        self.assertEqual(self.client.get(url).status_code, 403)
+        self.client.force_login(self.org_u)
+        self.assertEqual(self.client.get(url).status_code, 200)

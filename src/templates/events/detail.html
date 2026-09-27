@@ -43,5 +43,13 @@
   <button type="submit">Add team</button>
 </form>
 
+<h3>Judging</h3>
+<p class="empty" style="padding:6px 0">Assign judges to submissions, weight the rubric, and track scoring coverage.</p>
+<div class="filters">
+  <a class="chip" href="{% url 'judging:progress' event.ext_id %}">Judging progress</a>
+  <a class="chip" href="{% url 'judging:assignments' event.ext_id %}">Assignments</a>
+  <a class="chip" href="{% url 'judging:rubric' event.ext_id %}">Rubric weights</a>
+</div>
+
 <p style="margin-top:30px"><a href="{% url 'events:dashboard' %}">← all your events</a></p>
 {% endblock %}
