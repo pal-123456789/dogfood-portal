@@ -45,7 +45,9 @@ currently empty (`app_name` + `urlpatterns = []`) — its views are wired as fla
 that contribute *included* routes (`/accounts/`, `/events/`, `/submissions/`, `/judging/`,
 `/normalize/`). The `/submissions/` routes are participant self-service (edit / withdraw / "mine");
 they are reachable by URL but intentionally not linked from `base.html`, so the gallery and nav the
-checker renders stay byte-identical.
+checker renders stay byte-identical. The `/events/invite/<ext_id>` redeem route is the one `events`
+route addressed to an invitee rather than the organizer; like `/submissions/`, it is reachable by
+URL but not linked from `base.html`.
 
 | Method(s)  | Path                          | View                        | Access |
 |------------|-------------------------------|-----------------------------|--------|
@@ -62,6 +64,8 @@ checker renders stay byte-identical.
 | GET        | `/submissions/mine`           | `submissions.views.mine`    | authenticated participant; lists own submissions (all states) |
 | GET, POST  | `/submissions/<ext_id>/edit`  | `submissions.views.edit`    | owning team only; revise while accepting (else read-only); atomic + audited |
 | POST       | `/submissions/<ext_id>/withdraw` | `submissions.views.withdraw` | owning team only; soft-withdraw while accepting (state -> withdrawn, never a delete); atomic + audited |
+| POST       | `/events/<event>/invites/new` | `events.views.create_invite`| organizer of that event; mints a signed, single-use judge/participant invite (atomic + audited) |
+| GET, POST  | `/events/invite/<ext_id>`     | `events.views.redeem`       | authenticated invitee; GET confirms, POST redeems (Ed25519-verified, single-use, rate-limited) -> joins event |
 | GET        | `/debug/whoami`               | `gallery.views.whoami`      | DEMO-auth proof |
 | —          | `/admin/`                     | Django admin                | staff |
 | GET/POST   | `/accounts/login/`, `/logout/`| `accounts.views`            | public login / logout |
@@ -88,7 +92,7 @@ Seven domain apps plus the `portal` config package (`INSTALLED_APPS`):
 | `portal`      | settings, root URLconf, WSGI, the two middlewares, the rate-limit helper, bootstrap CLI | no | root URLconf |
 | `accounts`    | custom user (`AppUser`), demo-session shim, login/logout | yes | `/accounts/` |
 | `audit`       | append-only hash-chained log + Ed25519 checkpoints + offline verifier | yes | none |
-| `events`      | event / track / team / membership core graph | yes | `/events/` (organizer UI) |
+| `events`      | event / track / team / membership core graph + signed single-use invitations | yes | `/events/` (organizer UI + invitee redeem) |
 | `submissions` | submission create endpoint + service, plus participant self-service (edit / withdraw / "mine") | yes | `submit` (flat route) + `/submissions/` |
 | `judging`     | assignments, ballots, revisions, rubric weights, scores read + CSV export + in-app scoring | yes | `judge_scores`, `export_csv` (flat), `score` + organizer control room (`progress` / `assignments` / `rubric`, all `/judging/`) |
 | `normalize`   | score-normalization engine, signed runs, publication, diagnostics | yes | `/normalize/` |
@@ -118,12 +122,13 @@ Ed25519 (`cryptography`).
    (`src/audit/service.py`); the pure chain logic and `verify_chain` live in `src/audit/hashchain.py`.
    The head is seeded by a migration, not the request path. Beyond `record_ballot` and
    `create_submission`, the participant self-service writes (`update_submission`,
-   `withdraw_submission`) and the organizer control-room writes (`assign_judge`, `unassign_judge`,
-   `set_rubric_weights`) co-commit their own chained events — `submission.revised` /
-   `submission.withdrawn` / `judge.assigned` / `judge.unassigned` / `rubric.reweighted` — in the same
-   `transaction.atomic()` as the write, so a revision or withdrawal (and judging *configuration*)
-   rides the same tamper-evident trail as scores (a property of those service paths, not a
-   repo-wide guarantee).
+   `withdraw_submission`), the organizer control-room writes (`assign_judge`, `unassign_judge`,
+   `set_rubric_weights`), and the invitation writes (`create_invite`, `redeem_invite`) co-commit
+   their own chained events — `submission.revised` / `submission.withdrawn` / `judge.assigned` /
+   `judge.unassigned` / `rubric.reweighted` / `invite.created` / `invite.redeemed` — in the same
+   `transaction.atomic()` as the write, so a revision or withdrawal, judging *configuration*, and
+   invitation mint/redeem all ride the same tamper-evident trail as scores (a property of those
+   service paths, not a repo-wide guarantee).
 2. **Ed25519 signed checkpoints.** A checkpoint signs the chain tip under a per-deployment key at
    `/state/audit_ed25519_key.pem` (`O_EXCL`, `0600`) (`src/audit/keys.py`, `receipts.py`). Verify
    offline with `python -m audit.verify <bundle_dir>` (`src/audit/verify.py`).
@@ -134,6 +139,12 @@ Ed25519 (`cryptography`).
    (`src/normalize/verify.py`). The combined `python -m normalize.release` runs both sub-verifiers
    and adds four cross-links binding the checkpoint, the run, its audit event, and the published
    ranking CSV (`src/normalize/release.py`).
+
+A fourth signed artifact reuses the **same** `/state` key under a distinct domain tag: the
+single-use **invitation** (`dogfood.invite.v1`, `src/events/invite_signing.py`), re-checkable with
+`manage.py invite_verify <ext_id>`. It serves authorization (who may join in which role), not
+results integrity, so it sits outside the three-mechanism spine above; per-tag domain separation is
+what stops any of these four signatures from verifying in another's space.
 
 Honest scope: because the operator holds the private key, a PASS is decisive only if an independent
 party pinned the public key + fingerprint **before** judging. This is stated in the code and in
@@ -160,7 +171,7 @@ A fixed-window limiter over the shared `DatabaseCache` (`src/portal/ratelimit.py
 | `login`            | `10/m`  | **yes**         | `src/accounts/views.py` |
 | `submission_write` | `60/h`  | **yes** (DEMO shim exempt) | `src/submissions/views.py` |
 | `ballot_write`     | `120/h` | **yes** (DEMO shim exempt) | `src/judging/views.py` (`score`) |
-| `invite_redeem`    | `20/h`  | no — *planned*  | no invite flow exists |
+| `invite_redeem`    | `20/h`  | **yes** (DEMO shim exempt) | `src/events/views.py` (`redeem`) |
 
 ## Deployment topology
 
@@ -203,8 +214,8 @@ means the model/service may exist but no endpoint wires it yet.
 | **Event / team creation UI** | **Shipped** — organizer creates events, tracks, and teams in-app (the `dogfood_import` seed still works) | `src/events/{views,services,urls}.py`, `templates/events/{dashboard,detail}.html` |
 | **Rubric-weight editing** | **Shipped** — organizer sets per-criterion weights (live preview + next signed run; never rewrites a published result) | `src/judging/{views,services}.py`, `templates/judging/rubric.html` |
 | **Submission edit / withdraw** | **Shipped** — a team revises or **soft-withdraws** its own submission while the event is accepting writes (owner-gated, deadline-gated, atomic + audited); withdrawal flips state to `withdrawn` and hides it from the gallery but never deletes the row, so ballot/audit history survives | `src/submissions/{views,services,urls}.py`, `migrations/0002`, `templates/submissions/{mine,edit}.html`, `GET /submissions/mine`, `GET/POST /submissions/<id>/edit`, `POST /submissions/<id>/withdraw` |
-| **Single-use invitations** | *Not built* — no `Invite` model or flow | — |
-| **App models in Django admin** | **Shipped** — all 17 models registered; append-only/signed tables (audit, ballots, revisions, runs, publications) are inspect-only, and any row whose cascade would reach a **scored** assignment (the assignment itself, or a parent `Event`/`EventMembership`/`Submission`/`Team`/`AppUser`) refuses deletion so ballot history can't be destroyed through the admin UI (raw-DB access is the A8 operator boundary) | `src/*/admin.py`, `src/portal/admin_mixins.py` |
+| **Single-use invitations** | **Shipped** — an organizer mints a signed, single-use invite; redeeming it is Ed25519-verified, single-use (DB-enforced under `select_for_update`), rate-limited, and atomically creates an `EventMembership` + `invite.redeemed` audit event. Roles are limited to judge/participant, so a link can never escalate to organizer | `src/events/{models,invite_signing,services,views,urls}.py`, `migrations/0002_invite`, `templates/events/{detail,redeem}.html`, `manage.py invite_verify`; `GET`/`POST` `/events/invite/<ext_id>` |
+| **App models in Django admin** | **Shipped** — all 18 models registered; append-only/signed tables (audit, ballots, revisions, runs, publications) are inspect-only, the signed `Invite` table is likewise inspect-only with adding disabled (delete-to-revoke an un-redeemed link is still allowed), and any row whose cascade would reach a **scored** assignment (the assignment itself, or a parent `Event`/`EventMembership`/`Submission`/`Team`/`AppUser`) refuses deletion so ballot history can't be destroyed through the admin UI (raw-DB access is the A8 operator boundary) | `src/*/admin.py`, `src/portal/admin_mixins.py` |
 | **Multi-event support** | *Limitation by design* — uses the first event | `src/*/views.py` (`_current_event`) |
 
 

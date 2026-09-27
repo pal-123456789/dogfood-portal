@@ -30,6 +30,12 @@ written to be checkable line-by-line against `src/`.
   atomic and audited (`judge.assigned` / `judge.unassigned` / `rubric.reweighted`), and a **scored**
   assignment cannot be unassigned because its ballot history is append-only
   (`src/judging/{views,services}.py`).
+- **Signed single-use invitations** — an organizer mints a signed link inviting one person to join
+  as a judge or participant (`POST /events/<event>/invites/new`); redeeming it
+  (`GET/POST /events/invite/<ext_id>`) is Ed25519-verified, single-use (enforced in the database),
+  and rate-limited, and atomically grants the membership plus an audit event. A link can only ever
+  grant judge or participant — never organizer (`src/events/{invite_signing,services,views}.py`,
+  `manage.py invite_verify`).
 - **Organizer CSV export** — organizers export scored ballots as CSV with spreadsheet
   formula-injection guarding at `GET /api/export.csv` (`src/judging/{views,services}.py`).
 - **Normalized results** — organizers see an embargoed leaderboard and score diagnostics; the

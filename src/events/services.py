@@ -18,9 +18,23 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from audit import keys as audit_keys
 from audit import service as audit_service
 
-from .models import Event, EventMembership, Team, Track
+from . import invite_signing
+from .models import Event, EventMembership, Invite, Team, Track
+
+
+class InviteNotFound(Exception):
+    """No invite with the given ext_id -- mapped to 404 by the view."""
+
+
+class InviteInvalid(Exception):
+    """Signature failed to verify, or the invite has expired -- mapped to 400 by the view."""
+
+
+class InviteAlreadyRedeemed(Exception):
+    """The single-use invite was already consumed -- mapped to 409 by the view."""
 
 
 def _ext_id(prefix):
@@ -136,3 +150,77 @@ def set_state(actor, event, *, state, now=None):
             actor_user_id=actor.pk, occurred_at=now.isoformat(),
             payload={"from": previous, "to": state})
         return event
+
+
+# Membership ext_id prefixes for invite-granted rows, echoing the fixture shape (jdg_01, prt_..).
+_ROLE_PREFIX = {EventMembership.JUDGE: "jdg", EventMembership.PARTICIPANT: "prt"}
+
+
+def create_invite(actor, event, *, role, expires_at=None, now=None):
+    """Mint a signed, single-use invitation for `event` (atomic + audited).
+
+    Roles are limited to judge/participant -- organizer is only ever granted by create_event to
+    the creator, so a shared link can never escalate to organizer. The Ed25519 signature is over
+    the invite's canonical (event, ext_id, role, expiry) tuple using the one /state audit key, so
+    the redeem link is tamper-evident and offline-verifiable. Authorization (organizer-of-this-
+    event) is enforced by the caller (views), matching create_track/create_team.
+    """
+    now = now or timezone.now()
+    if role not in _ROLE_PREFIX:
+        raise ValidationError("An invitation may grant only the judge or participant role.")
+    ext_id = _ext_id("inv")
+    expires_iso = expires_at.isoformat() if expires_at else ""
+    key, _ = audit_keys.ensure_private_key()   # same key path as the audit spine; create-or-load
+    signature = invite_signing.sign_invite(
+        key, event_ext_id=event.ext_id, invite_ext_id=ext_id, role=role, expires_at=expires_iso)
+    with transaction.atomic():
+        invite = Invite.objects.create(
+            ext_id=ext_id, event=event, role=role, signature=signature, created_by=actor,
+            expires_at=expires_at)
+        audit_service.record_event(
+            event_type="invite.created", object_type="invite", object_id=invite.ext_id,
+            actor_user_id=actor.pk, occurred_at=now.isoformat(),
+            payload={"event": event.ext_id, "role": role, "expires_at": expires_iso})
+        return invite
+
+
+def redeem_invite(actor, ext_id, signature, *, now=None):
+    """Redeem an invite for `actor`: verify the signature, enforce single-use, then create the
+    membership + audit row in one transaction. Returns the EventMembership.
+
+    Single-use is enforced in the DB, not the signature: the row is locked FOR UPDATE and its
+    redeemed_at re-checked inside the transaction, so two racing redemptions cannot both grant a
+    membership (the loser blocks, then sees redeemed_at set -> InviteAlreadyRedeemed). Nothing is
+    written on the not-found / bad-signature / expired / already-redeemed paths.
+    """
+    now = now or timezone.now()
+    key, _ = audit_keys.ensure_private_key()
+    pub = key.public_key()
+    with transaction.atomic():
+        try:
+            invite = (Invite.objects.select_for_update()
+                      .select_related("event").get(ext_id=ext_id))
+        except Invite.DoesNotExist:
+            raise InviteNotFound(ext_id)
+        expires_iso = invite.expires_at.isoformat() if invite.expires_at else ""
+        if not invite_signing.verify_invite(
+                pub, signature=signature or "", event_ext_id=invite.event.ext_id,
+                invite_ext_id=invite.ext_id, role=invite.role, expires_at=expires_iso):
+            raise InviteInvalid("This invitation link is invalid or has been altered.")
+        if invite.is_expired(now):
+            raise InviteInvalid("This invitation has expired.")
+        if invite.redeemed_at is not None:
+            raise InviteAlreadyRedeemed(invite.ext_id)
+        membership, _created = EventMembership.objects.get_or_create(
+            user=actor, event=invite.event, role=invite.role,
+            defaults={"ext_id": _ext_id(_ROLE_PREFIX[invite.role])})
+        invite.redeemed_at = now
+        invite.redeemed_by = actor
+        invite.save(update_fields=["redeemed_at", "redeemed_by"])
+        audit_service.record_event(
+            event_type="invite.redeemed", object_type="invite", object_id=invite.ext_id,
+            actor_user_id=actor.pk, actor_membership_id=membership.ext_id,
+            occurred_at=now.isoformat(),
+            payload={"event": invite.event.ext_id, "role": invite.role,
+                     "membership": membership.ext_id})
+        return membership

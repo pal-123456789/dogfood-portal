@@ -1,6 +1,6 @@
 # Data model
 
-Seventeen models across six domain apps (`gallery` and `portal` define no models). Every migration
+Eighteen models across six domain apps (`gallery` and `portal` define no models). Every migration
 is **hand-authored** to match its models, and the image build runs `manage.py makemigrations
 --check`, so a model and its migration cannot silently drift. There are **no composite foreign keys,
 no database triggers, no `RunSQL` DDL, and no `citext`** anywhere — every constraint below is an
@@ -82,6 +82,21 @@ single-event: callers resolve the current event with `Event.objects.order_by("id
 (`organizer` / `judge` / `participant`); `ext_id` `CharField(64)` blank (e.g. `jdg_01`). Constraint
 `uniq_user_event_role` = `UniqueConstraint(user, event, role)`. **This table is the sole source of
 authorization** — there are no global "is organizer / is judge" user flags.
+
+### `Invite` — table `invite` — live (create + redeem)
+A signed, single-use invitation to join an event as a judge or participant. `ext_id`
+(`unique=True`, `inv_<uuid16>`); `event` FK (CASCADE); `role` `CharField(16)` — **`judge` /
+`participant` only**, never `organizer`, so a shared link can add a member but can never mint an
+organizer; `signature` `CharField(128)` = hex Ed25519 signature over the canonical
+`(event_ext_id, invite_ext_id, role, expires_at)` tuple under domain tag `dogfood.invite.v1`,
+signed with the **same `/state` key as the audit spine** (`events/invite_signing.py`); `created_by`
+FK -> `AppUser` (CASCADE, the minting organizer); `created_at` (`auto_now_add`); `expires_at`
+nullable (blank = never expires); `redeemed_at` nullable; `redeemed_by` FK -> `AppUser`
+(`SET_NULL`, nullable). Single-use is a **DB** property, not a signature one: `redeem_invite` locks
+the row `FOR UPDATE`, re-checks `redeemed_at` inside the transaction, then creates the
+`EventMembership` + a `invite.redeemed` audit event atomically — two concurrent redemptions cannot
+both grant. No `UNIQUE(event, role)`; an organizer mints as many links as needed. Offline-verifiable
+with `manage.py invite_verify <ext_id>`.
 
 ### `Track` — table `track` — live (read) / seed
 `ext_id` (`unique=True`), `event` FK (CASCADE), `name`. The `?track=` gallery filter and the submit
@@ -204,7 +219,15 @@ erDiagram
     Submission ||--o{ JudgeAssignment : "reviewed by"
     JudgeAssignment ||--|| Ballot : "current score"
     Ballot ||--o{ BallotRevision : "history"
+    Event ||--o{ Invite : "scopes"
+    AppUser ||--o{ Invite : "mints / redeems"
 
+    Invite {
+        string ext_id
+        string role
+        string signature
+        datetime redeemed_at
+    }
     AuditHead {
         bool singleton
         bigint seq

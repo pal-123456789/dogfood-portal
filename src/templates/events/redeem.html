@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Join {{ event.name }} — dogfood portal{% endblock %}
+{% block content %}
+<div class="lede">
+  <h1>Event invitation</h1>
+  <p><code>{{ event.name }}</code> · role <code>{{ invite.role }}</code></p>
+</div>
+
+{% if state == "confirm" %}
+<div class="card">
+  <p>You've been invited to join <strong>{{ event.name }}</strong> as
+     <strong>{{ invite.role }}</strong>.</p>
+  <p class="empty" style="padding:6px 0">This link can be used once. Joining creates your
+     membership and records an audit event.</p>
+  <form class="stack" method="post" action="{% url 'events:redeem' invite.ext_id %}">
+    {% csrf_token %}
+    <input type="hidden" name="sig" value="{{ sig }}">
+    <button type="submit">Join event</button>
+  </form>
+</div>
+{% elif state == "joined" %}
+<div class="notice">You've joined <strong>{{ event.name }}</strong> as
+  <strong>{{ invite.role }}</strong>. You're all set.</div>
+{% elif state == "redeemed" %}
+<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">This invitation has already been
+  used and cannot be redeemed again.</div>
+{% elif state == "expired" %}
+<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">This invitation has expired.</div>
+{% else %}
+<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">{{ error }}</div>
+{% endif %}
+
+<p style="margin-top:30px"><a href="/projects">← project gallery</a></p>
+{% endblock %}

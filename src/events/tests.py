@@ -7,14 +7,18 @@ checker never touches /events/, so these are pure feature tests -- none of the f
 or base.html are exercised here.
 """
 from datetime import timedelta
+from io import StringIO
 
+from django.conf import settings
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth import get_user_model
-from django.test import RequestFactory, TestCase
+from django.core.management import call_command
+from django.core.management.base import CommandError
+from django.test import RequestFactory, TestCase, override_settings
 from django.utils import timezone
 
 from audit.models import AuditEvent
-from events.models import Event, EventMembership, Team, Track
+from events.models import Event, EventMembership, Invite, Team, Track
 from submissions.models import Submission
 
 User = get_user_model()
@@ -213,3 +217,174 @@ class ParentCascadeAdminDeleteGuardTests(TestCase):
         self.assertFalse(ma.has_delete_permission(self.req, self.team))
         self.assertTrue(ma.has_delete_permission(self.req, self.clean_team))
         self.assertNotIn("delete_selected", ma.get_actions(self.req))
+
+
+class InviteUITests(TestCase):
+    """DB-backed feature tests for signed single-use invitations (§20): minting (organizer-gated,
+    audited), the invitee redeem flow (confirm -> join), single-use enforcement, signature/expiry
+    rejection, the per-user redeem rate limit, and the invite_verify operator command.
+
+    Signing reuses the one /state Ed25519 key via audit.keys.ensure_private_key, so create_invite
+    and redeem share a key path -- these assert BEHAVIOUR (round-trip, tamper rejection), while the
+    golden fingerprint and wire format are pinned DB-free in tests/test_invite_signing.py.
+    """
+
+    def setUp(self):
+        self.org = User.objects.create_user(
+            email="org@example.org", password="pw", display_name="Org")
+        self.guest = User.objects.create_user(email="guest@example.org", password="pw")
+        self.client.force_login(self.org)
+        self.client.post("/events/new", {"name": "E", "submissions_close": FUTURE})
+        self.event = Event.objects.get(name="E")
+
+    def _create_invite(self, role=EventMembership.JUDGE, expires_at=""):
+        """POST the organizer create-invite form; returns the response (caller asserts on it)."""
+        self.client.force_login(self.org)
+        return self.client.post(
+            "/events/%s/invites/new" % self.event.ext_id,
+            {"role": role, "expires_at": expires_at})
+
+    # -- minting -------------------------------------------------------------
+    def test_organizer_creates_invite_signed_and_audited(self):
+        before = AuditEvent.objects.count()
+        resp = self._create_invite()
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.url, "/events/%s?ok=invite" % self.event.ext_id)
+        inv = Invite.objects.get(event=self.event)
+        self.assertTrue(inv.ext_id.startswith("inv_"))
+        self.assertEqual(inv.role, EventMembership.JUDGE)
+        self.assertEqual(len(inv.signature), 128)          # 64 raw bytes -> 128 hex chars
+        self.assertIsNone(inv.redeemed_at)
+        self.assertTrue(AuditEvent.objects.filter(
+            event_type="invite.created", object_id=inv.ext_id).exists())
+        self.assertEqual(AuditEvent.objects.count(), before + 1)
+
+    def test_create_invite_non_organizer_403_writes_nothing(self):
+        self.client.force_login(self.guest)
+        resp = self.client.post(
+            "/events/%s/invites/new" % self.event.ext_id, {"role": EventMembership.JUDGE})
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(Invite.objects.exists())
+
+    def test_create_invite_rejects_unknown_role(self):
+        # Only judge/participant may be granted -- a shared link can never escalate to organizer.
+        resp = self._create_invite(role=EventMembership.ORGANIZER)
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Invite.objects.exists())
+
+    def test_detail_lists_the_invite_link(self):
+        self._create_invite()
+        inv = Invite.objects.get(event=self.event)
+        resp = self.client.get("/events/%s" % self.event.ext_id)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, inv.ext_id)      # the shareable redeem path is shown...
+        self.assertContains(resp, "?sig=")         # ...with its signature query string
+        self.assertContains(resp, "active")        # and a not-yet-redeemed status
+
+    # -- redeem: happy path + single use -------------------------------------
+    def test_redeem_confirm_then_join_creates_membership_and_audits(self):
+        self._create_invite()
+        inv = Invite.objects.get(event=self.event)
+        self.client.force_login(self.guest)
+        get = self.client.get("/events/invite/%s?sig=%s" % (inv.ext_id, inv.signature))
+        self.assertEqual(get.status_code, 200)
+        self.assertContains(get, "Join event")
+        before = AuditEvent.objects.count()
+        resp = self.client.post("/events/invite/%s" % inv.ext_id, {"sig": inv.signature})
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.url, "/events/invite/%s?joined=1" % inv.ext_id)
+        self.assertTrue(EventMembership.objects.filter(
+            user=self.guest, event=self.event, role=EventMembership.JUDGE).exists())
+        inv.refresh_from_db()
+        self.assertIsNotNone(inv.redeemed_at)
+        self.assertEqual(inv.redeemed_by_id, self.guest.pk)
+        self.assertTrue(AuditEvent.objects.filter(
+            event_type="invite.redeemed", object_id=inv.ext_id).exists())
+        self.assertEqual(AuditEvent.objects.count(), before + 1)
+        joined = self.client.get("/events/invite/%s?joined=1" % inv.ext_id)
+        self.assertContains(joined, "joined")
+
+    def test_second_redeem_is_rejected_single_use(self):
+        self._create_invite()
+        inv = Invite.objects.get(event=self.event)
+        self.client.force_login(self.guest)
+        first = self.client.post("/events/invite/%s" % inv.ext_id, {"sig": inv.signature})
+        self.assertEqual(first.status_code, 302)
+        # The same link a second time is refused (409) and grants no second membership.
+        again = self.client.post("/events/invite/%s" % inv.ext_id, {"sig": inv.signature})
+        self.assertEqual(again.status_code, 409)
+        self.assertEqual(EventMembership.objects.filter(
+            user=self.guest, event=self.event, role=EventMembership.JUDGE).count(), 1)
+
+    # -- redeem: rejection paths ---------------------------------------------
+    def test_redeem_with_bad_signature_400_writes_nothing(self):
+        self._create_invite()
+        inv = Invite.objects.get(event=self.event)
+        self.client.force_login(self.guest)
+        for bad in ("00" * 64, "not-hex", ""):     # wrong sig / malformed hex / empty
+            resp = self.client.post("/events/invite/%s" % inv.ext_id, {"sig": bad})
+            self.assertEqual(resp.status_code, 400)
+        inv.refresh_from_db()
+        self.assertIsNone(inv.redeemed_at)
+        self.assertFalse(EventMembership.objects.filter(
+            user=self.guest, event=self.event).exists())
+
+    def test_redeem_expired_invite_is_refused(self):
+        # parse_close accepts any parseable datetime; a past expiry then fails is_expired(now).
+        self._create_invite(expires_at="2000-01-01T00:00")
+        inv = Invite.objects.get(event=self.event)
+        self.assertIsNotNone(inv.expires_at)
+        self.client.force_login(self.guest)
+        get = self.client.get("/events/invite/%s?sig=%s" % (inv.ext_id, inv.signature))
+        self.assertContains(get, "expired")        # the confirm page shows the expired state
+        post = self.client.post("/events/invite/%s" % inv.ext_id, {"sig": inv.signature})
+        self.assertEqual(post.status_code, 400)     # signature is valid, but expiry rejects it
+        self.assertFalse(EventMembership.objects.filter(
+            user=self.guest, event=self.event).exists())
+
+    # -- redeem: auth + not-found -------------------------------------------
+    def test_redeem_anonymous_redirects_to_login(self):
+        self._create_invite()
+        inv = Invite.objects.get(event=self.event)
+        self.client.logout()
+        resp = self.client.get("/events/invite/%s?sig=%s" % (inv.ext_id, inv.signature))
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(resp.url.startswith("/accounts/login/"))
+
+    def test_redeem_unknown_invite_404(self):
+        self.client.force_login(self.guest)
+        self.assertEqual(self.client.get("/events/invite/inv_missing").status_code, 404)
+
+    # -- rate limit ----------------------------------------------------------
+    def test_redeem_is_rate_limited_per_user(self):
+        # The limiter fails open when the cache is unavailable -- and the DB cache table is absent
+        # under `manage.py test` -- so pin a LocMemCache and a 1/h ceiling. The second redeem (a
+        # DIFFERENT link, same user) is then refused with 429 BEFORE the service runs.
+        self._create_invite()
+        self._create_invite()
+        a, b = list(Invite.objects.filter(event=self.event).order_by("id"))
+        self.client.force_login(self.guest)
+        limits = dict(settings.DOGFOOD_RATE_LIMITS, invite_redeem="1/h")
+        with override_settings(
+                CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
+                DOGFOOD_RATE_LIMITS=limits):
+            first = self.client.post("/events/invite/%s" % a.ext_id, {"sig": a.signature})
+            self.assertEqual(first.status_code, 302)
+            second = self.client.post("/events/invite/%s" % b.ext_id, {"sig": b.signature})
+        self.assertEqual(second.status_code, 429)
+        self.assertIn("Retry-After", second)
+        b.refresh_from_db()
+        self.assertIsNone(b.redeemed_at)            # blocked before the service, so B is untouched
+
+    # -- operator command ----------------------------------------------------
+    def test_invite_verify_command_reports_verified_then_failed(self):
+        self._create_invite()
+        inv = Invite.objects.get(event=self.event)
+        out = StringIO()
+        call_command("invite_verify", inv.ext_id, stdout=out)
+        self.assertIn("VERIFIED", out.getvalue())
+        # Tamper the stored signature: the command must print FAILED and exit non-zero.
+        inv.signature = "00" * 64
+        inv.save(update_fields=["signature"])
+        with self.assertRaises(CommandError):
+            call_command("invite_verify", inv.ext_id, stdout=StringIO())

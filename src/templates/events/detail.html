@@ -43,6 +43,37 @@
   <button type="submit">Add team</button>
 </form>
 
+<h3>Invitations</h3>
+<p class="empty" style="padding:6px 0">Signed, single-use links to join this event as a judge or
+   participant. Each link verifies against the deployment's Ed25519 key and works exactly once;
+   share one with one person. Organizer access is never granted by a link.</p>
+{% if invites %}
+<div class="grid">
+  {% for inv in invites %}
+  <div class="card">
+    <div class="meta">
+      <span class="tag">{{ inv.role }}</span>
+      {% if inv.redeemed %}<span class="tag">redeemed</span>
+      {% elif inv.expired %}<span class="tag">expired</span>
+      {% else %}<span class="tag">active</span>{% endif %}
+    </div>
+    <p style="word-break:break-all"><code>{{ inv.path }}</code></p>
+    {% if inv.expires_at %}<p class="empty">Expires <code>{{ inv.expires_at }}</code></p>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}<p class="empty">No invitations yet.</p>{% endif %}
+<form class="stack" method="post" action="{% url 'events:create_invite' event.ext_id %}">
+  {% csrf_token %}
+  <label>Role
+    <select name="role">
+      {% for value, label in invite_roles %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Expires (optional)<input type="datetime-local" name="expires_at"></label>
+  <button type="submit">Create invitation</button>
+</form>
+
 <h3>Judging</h3>
 <p class="empty" style="padding:6px 0">Assign judges to submissions, weight the rubric, and track scoring coverage.</p>
 <div class="filters">

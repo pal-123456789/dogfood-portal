@@ -103,3 +103,45 @@ class BootstrapState(models.Model):
 
     def __str__(self):
         return "%s=%s" % (self.key, self.version)
+
+
+class Invite(models.Model):
+    """A signed, single-use invitation to join an event in a role (§20).
+
+    An organizer mints one; the redeem link carries an Ed25519 signature over the invite's
+    canonical fields (events/invite_signing.py, tag dogfood.invite.v1), signed with the SAME
+    /state key as the audit spine, so anyone with the deployment's public key can verify it and
+    only the key-holder can forge one. Single use is enforced in the DB, not the signature:
+    `redeemed_at` flips from NULL under `select_for_update` inside the redeem transaction, so two
+    concurrent redemptions cannot both create a membership. Roles are limited to JUDGE/PARTICIPANT
+    -- organizer is only ever granted by create_event to the creator, so a shared link can never
+    escalate to organizer. The row is never deleted on redeem; it is the audit-linked receipt that
+    a specific person consumed it.
+    """
+    JUDGE, PARTICIPANT = EventMembership.JUDGE, EventMembership.PARTICIPANT
+    ROLES = [(JUDGE, "judge"), (PARTICIPANT, "participant")]
+
+    ext_id = models.CharField(max_length=64, unique=True)
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="invites")
+    role = models.CharField(max_length=16, choices=ROLES)
+    signature = models.CharField(max_length=128)  # hex Ed25519 sig (64 raw bytes -> 128 hex)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                   related_name="invites_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    redeemed_at = models.DateTimeField(null=True, blank=True)
+    redeemed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                    null=True, blank=True, related_name="invites_redeemed")
+
+    class Meta:
+        db_table = "invite"
+
+    def __str__(self):
+        return "%s:%s" % (self.ext_id, self.role)
+
+    @property
+    def is_redeemed(self):
+        return self.redeemed_at is not None
+
+    def is_expired(self, now):
+        return self.expires_at is not None and now >= self.expires_at
