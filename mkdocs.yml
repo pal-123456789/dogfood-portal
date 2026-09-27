@@ -9,3 +9,10 @@ nav:
   - Data model: DATA-MODEL.md
   - Judging: JUDGING.md
   - Threat model: THREAT-MODEL.md
+markdown_extensions:
+  # Render ```mermaid blocks as diagrams (pymdownx ships with mkdocs-material).
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format

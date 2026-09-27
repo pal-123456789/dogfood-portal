@@ -1,11 +1,16 @@
 # .github/workflows/pages.yml
 name: pages
 on:
-  # Manual-only until the docs/ tree exists AND Pages is enabled
-  # (repo Settings > Pages > Source: GitHub Actions). Flip back to
-  # `push: {branches: [main]}` in the commit that lands docs/.
+  # docs/ now exists and the site builds, so auto-deploy on pushes that touch
+  # the docs tree or this workflow. Manual runs stay available too.
+  push:
+    branches: [main]
+    paths: ['docs/**', 'mkdocs.yml', '.github/workflows/pages.yml']
   workflow_dispatch: {}
 permissions: {contents: read, pages: write, id-token: write}
+concurrency:
+  group: pages
+  cancel-in-progress: false
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
