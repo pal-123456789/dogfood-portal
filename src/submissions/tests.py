@@ -16,6 +16,7 @@ from django.test import RequestFactory, TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import AppUser, DemoSession
+from audit.models import AuditEvent
 from events.models import Event, EventMembership, Team, TeamMember, Track
 from submissions.models import Submission
 
@@ -124,3 +125,146 @@ class SubmissionAdminDeleteGuardTests(TestCase):
         self.assertFalse(ma.has_delete_permission(self.req, self.scored))
         self.assertTrue(ma.has_delete_permission(self.req, self.unscored))
         self.assertNotIn("delete_selected", ma.get_actions(self.req))
+
+
+@override_settings(CACHES=_LOCMEM)
+class SubmissionEditWithdrawTests(TestCase):
+    """Participant self-service: revise or soft-withdraw an OWNED submission while the event
+    is still accepting writes. The gates live in submissions.services (auth -> participant ->
+    ownership -> deadline), so these tests drive them through the real /submissions/ routes.
+
+    Soft-withdraw is the load-bearing property: withdrawing flips state to WITHDRAWN and drops
+    the project from the public gallery, but never deletes the row -- so any Ballot ->
+    BallotRevision history and the audit trail beneath it survive (the same non-destructive
+    stance the A8 admin guards enforce). A single event is created so gallery/submissions'
+    `_current_event()` (first by id) resolves to it.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.event = Event.objects.create(
+            ext_id="evt_ew", name="EW", state=Event.OPEN,
+            submissions_close=timezone.now() + timedelta(days=1))
+        cls.track = Track.objects.create(ext_id="trk_ew", event=cls.event, name="Main")
+        cls.alice = AppUser.objects.create_user(email="alice@t.demo", display_name="alice")
+        EventMembership.objects.create(user=cls.alice, event=cls.event,
+                                       role=EventMembership.PARTICIPANT)
+        cls.team_a = Team.objects.create(ext_id="tm_a", event=cls.event, name="Team A")
+        TeamMember.objects.create(team=cls.team_a, user=cls.alice)
+        cls.bob = AppUser.objects.create_user(email="bob@t.demo", display_name="bob")
+        EventMembership.objects.create(user=cls.bob, event=cls.event,
+                                       role=EventMembership.PARTICIPANT)
+        cls.team_b = Team.objects.create(ext_id="tm_b", event=cls.event, name="Team B")
+        TeamMember.objects.create(team=cls.team_b, user=cls.bob)
+        cls.sub = Submission.objects.create(
+            ext_id="prj_ew", event=cls.event, team=cls.team_a, track=cls.track,
+            title="Alpha Project", summary="first", repo_url="https://example.test/a",
+            state=Submission.SUBMITTED)
+
+    def setUp(self):
+        caches["default"].clear()
+
+    def _edit_url(self, ext="prj_ew"):
+        return "/submissions/%s/edit" % ext
+
+    # --- edit -----------------------------------------------------------------------------
+    def test_owner_can_revise_while_open_and_it_is_audited(self):
+        self.client.force_login(self.alice)
+        resp = self.client.post(self._edit_url(), {
+            "title": "Alpha Renamed", "summary": "revised", "repo_url": "https://example.test/z"})
+        self.assertRedirects(resp, "/submissions/mine")
+        self.sub.refresh_from_db()
+        self.assertEqual(self.sub.title, "Alpha Renamed")
+        self.assertEqual(self.sub.summary, "revised")
+        self.assertTrue(AuditEvent.objects.filter(
+            event_type="submission.revised", object_id="prj_ew").exists())
+
+    def test_edit_get_prefills_current_values_for_owner(self):
+        self.client.force_login(self.alice)
+        resp = self.client.get(self._edit_url())
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Alpha Project")
+
+    def test_non_owner_cannot_edit(self):
+        self.client.force_login(self.bob)
+        self.assertEqual(self.client.get(self._edit_url()).status_code, 403)
+        self.assertEqual(self.client.post(
+            self._edit_url(), {"title": "hijack"}).status_code, 403)
+        self.sub.refresh_from_db()
+        self.assertEqual(self.sub.title, "Alpha Project")
+
+    def test_unknown_ext_id_is_404(self):
+        self.client.force_login(self.alice)
+        self.assertEqual(self.client.get(self._edit_url("prj_nope")).status_code, 404)
+
+    def test_anonymous_is_redirected_to_login(self):
+        resp = self.client.get("/submissions/mine")
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(resp["Location"].startswith("/accounts/login/"))
+    # SENTINEL_EW_TESTS
+
+    # --- withdraw (soft; preserves history) ------------------------------------------------
+    def test_withdraw_hides_from_gallery_but_keeps_row_and_ballot(self):
+        from judging import services as judging_services
+        judge_user = AppUser.objects.create_user(email="jew@t.demo", display_name="J")
+        judge = EventMembership.objects.create(
+            user=judge_user, event=self.event, role=EventMembership.JUDGE, ext_id="mem_ew")
+        judging_services.record_ballot(judge, self.sub,
+                                       functionality=4, quality=4, innovation=4)
+        from judging.models import Ballot
+        self.assertEqual(Ballot.objects.filter(assignment__submission=self.sub).count(), 1)
+        # visible before withdrawal
+        self.assertContains(self.client.get("/projects"), "Alpha Project")
+
+        self.client.force_login(self.alice)
+        resp = self.client.post("/submissions/prj_ew/withdraw")
+        self.assertRedirects(resp, "/submissions/mine")
+
+        self.sub.refresh_from_db()
+        self.assertEqual(self.sub.state, Submission.WITHDRAWN)
+        # row + ballot history survive; only visibility changed
+        self.assertTrue(Submission.objects.filter(ext_id="prj_ew").exists())
+        self.assertEqual(Ballot.objects.filter(assignment__submission=self.sub).count(), 1)
+        self.assertNotContains(self.client.get("/projects"), "Alpha Project")
+        self.assertTrue(AuditEvent.objects.filter(
+            event_type="submission.withdrawn", object_id="prj_ew").exists())
+
+    def test_withdraw_is_idempotent_from_the_button(self):
+        self.client.force_login(self.alice)
+        self.client.post("/submissions/prj_ew/withdraw")
+        # a second click still lands back on the list (no 500), state stays withdrawn
+        self.assertRedirects(self.client.post("/submissions/prj_ew/withdraw"),
+                             "/submissions/mine")
+        self.sub.refresh_from_db()
+        self.assertEqual(self.sub.state, Submission.WITHDRAWN)
+
+    def test_withdrawn_submission_cannot_be_edited(self):
+        self.client.force_login(self.alice)
+        self.client.post("/submissions/prj_ew/withdraw")
+        resp = self.client.post(self._edit_url(),
+                                {"title": "sneak un-withdraw", "summary": "x"})
+        self.assertEqual(resp.status_code, 400)
+        self.sub.refresh_from_db()
+        self.assertEqual(self.sub.state, Submission.WITHDRAWN)
+        self.assertEqual(self.sub.title, "Alpha Project")
+
+    # --- deadline gate (parity with check 3) -----------------------------------------------
+    def test_edit_and_withdraw_refused_after_close(self):
+        self.event.state = Event.CLOSED
+        self.event.submissions_close = timezone.now() - timedelta(days=1)
+        self.event.save(update_fields=["state", "submissions_close"])
+        self.client.force_login(self.alice)
+        self.assertEqual(self.client.post(
+            self._edit_url(), {"title": "late", "summary": "x"}).status_code, 403)
+        self.assertEqual(self.client.post("/submissions/prj_ew/withdraw").status_code, 403)
+        self.sub.refresh_from_db()
+        self.assertEqual(self.sub.title, "Alpha Project")
+        self.assertEqual(self.sub.state, Submission.SUBMITTED)
+
+    # --- my submissions list ---------------------------------------------------------------
+    def test_mine_lists_owned_including_withdrawn(self):
+        self.client.force_login(self.alice)
+        self.client.post("/submissions/prj_ew/withdraw")
+        resp = self.client.get("/submissions/mine")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Alpha Project")   # withdrawn rows still show on the owner's list

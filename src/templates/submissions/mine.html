@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}My submissions · Dogfood Portal{% endblock %}
+{% block content %}
+  <section class="lede">
+    <h1>My submissions</h1>
+    <p>{% if event %}{{ event.name }} — {% endif %}revise or withdraw a project your team entered.</p>
+  </section>
+
+  {% if not open %}
+    <p class="notice">This event is no longer accepting changes. Your submissions are shown
+      below for reference; editing and withdrawal are closed.</p>
+  {% endif %}
+
+  {% if submissions %}
+    <div class="grid">
+      {% for s in submissions %}
+        <div class="card">
+          <h3>{{ s.title }}</h3>
+          <p class="sum">{{ s.summary|default:"—" }}</p>
+          <div class="meta">
+            <span class="tag">{{ s.track.name }}</span>
+            <span class="tag">{{ s.team.name }}</span>
+            {% if s.state == withdrawn_state %}
+              <span class="chip">withdrawn</span>
+            {% else %}
+              <span class="tag">{{ s.state }}</span>
+            {% endif %}
+          </div>
+          {% if s.state != withdrawn_state and open %}
+            <div class="meta" style="margin-top:12px">
+              <a class="chip" href="/submissions/{{ s.ext_id }}/edit">Edit</a>
+              <form method="post" action="/submissions/{{ s.ext_id }}/withdraw">
+                {% csrf_token %}
+                <button type="submit">Withdraw</button>
+              </form>
+            </div>
+          {% elif s.state != withdrawn_state %}
+            <div class="meta" style="margin-top:12px">
+              <a class="chip" href="/submissions/{{ s.ext_id }}/edit">View</a>
+            </div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="empty">You have no submissions in this event yet.
+      <a href="/projects/new">Submit a project</a>.</p>
+  {% endif %}
+{% endblock %}

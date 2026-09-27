@@ -39,10 +39,13 @@ event — all atomically, so none can exist without the others.
 ## The reachable HTTP surface
 
 The complete routing table is `src/portal/urls.py`. The five flat, un-prefixed routes below are the
-acceptance-checker contract and are kept byte-stable; the app-level `urls.py` for `gallery` and
-`submissions` are currently empty (`app_name` + `urlpatterns = []`) — their views are wired as flat
-routes in `portal/urls.py` — so `accounts`, `events`, `judging`, and `normalize` are the apps that
-contribute *included* routes (`/accounts/`, `/events/`, `/judging/`, `/normalize/`).
+acceptance-checker contract and are kept byte-stable; the app-level `urls.py` for `gallery` is
+currently empty (`app_name` + `urlpatterns = []`) — its views are wired as flat routes in
+`portal/urls.py` — so `accounts`, `events`, `submissions`, `judging`, and `normalize` are the apps
+that contribute *included* routes (`/accounts/`, `/events/`, `/submissions/`, `/judging/`,
+`/normalize/`). The `/submissions/` routes are participant self-service (edit / withdraw / "mine");
+they are reachable by URL but intentionally not linked from `base.html`, so the gallery and nav the
+checker renders stay byte-identical.
 
 | Method(s)  | Path                          | View                        | Access |
 |------------|-------------------------------|-----------------------------|--------|
@@ -56,6 +59,9 @@ contribute *included* routes (`/accounts/`, `/events/`, `/judging/`, `/normalize
 | GET        | `/judging/<event>/assignments`| `judging.views.assignments` | organizer of that event; assignment console |
 | POST       | `/judging/<event>/assignments/add`, `/remove` | `judging.views.assign` / `unassign` | organizer of that event; add, or remove an **unscored** assignment (atomic + audited) |
 | GET, POST  | `/judging/<event>/rubric`     | `judging.views.rubric`      | organizer of that event; per-criterion weights (preview + next signed run) |
+| GET        | `/submissions/mine`           | `submissions.views.mine`    | authenticated participant; lists own submissions (all states) |
+| GET, POST  | `/submissions/<ext_id>/edit`  | `submissions.views.edit`    | owning team only; revise while accepting (else read-only); atomic + audited |
+| POST       | `/submissions/<ext_id>/withdraw` | `submissions.views.withdraw` | owning team only; soft-withdraw while accepting (state -> withdrawn, never a delete); atomic + audited |
 | GET        | `/debug/whoami`               | `gallery.views.whoami`      | DEMO-auth proof |
 | —          | `/admin/`                     | Django admin                | staff |
 | GET/POST   | `/accounts/login/`, `/logout/`| `accounts.views`            | public login / logout |
@@ -83,7 +89,7 @@ Seven domain apps plus the `portal` config package (`INSTALLED_APPS`):
 | `accounts`    | custom user (`AppUser`), demo-session shim, login/logout | yes | `/accounts/` |
 | `audit`       | append-only hash-chained log + Ed25519 checkpoints + offline verifier | yes | none |
 | `events`      | event / track / team / membership core graph | yes | `/events/` (organizer UI) |
-| `submissions` | submission create endpoint + service | yes | `submit` (flat route) |
+| `submissions` | submission create endpoint + service, plus participant self-service (edit / withdraw / "mine") | yes | `submit` (flat route) + `/submissions/` |
 | `judging`     | assignments, ballots, revisions, rubric weights, scores read + CSV export + in-app scoring | yes | `judge_scores`, `export_csv` (flat), `score` + organizer control room (`progress` / `assignments` / `rubric`, all `/judging/`) |
 | `normalize`   | score-normalization engine, signed runs, publication, diagnostics | yes | `/normalize/` |
 | `gallery`     | public project listing + `whoami` | no | flat routes |
@@ -111,11 +117,13 @@ Ed25519 (`cryptography`).
    append service locks the head row `FOR UPDATE` so sequence numbers never race
    (`src/audit/service.py`); the pure chain logic and `verify_chain` live in `src/audit/hashchain.py`.
    The head is seeded by a migration, not the request path. Beyond `record_ballot` and
-   `create_submission`, the organizer control-room writes (`assign_judge`, `unassign_judge`,
-   `set_rubric_weights`) co-commit their own chained events — `judge.assigned` / `judge.unassigned`
-   / `rubric.reweighted` — in the same `transaction.atomic()` as the write, so judging
-   *configuration* rides the same tamper-evident trail as scores (a property of those service
-   paths, not a repo-wide guarantee).
+   `create_submission`, the participant self-service writes (`update_submission`,
+   `withdraw_submission`) and the organizer control-room writes (`assign_judge`, `unassign_judge`,
+   `set_rubric_weights`) co-commit their own chained events — `submission.revised` /
+   `submission.withdrawn` / `judge.assigned` / `judge.unassigned` / `rubric.reweighted` — in the same
+   `transaction.atomic()` as the write, so a revision or withdrawal (and judging *configuration*)
+   rides the same tamper-evident trail as scores (a property of those service paths, not a
+   repo-wide guarantee).
 2. **Ed25519 signed checkpoints.** A checkpoint signs the chain tip under a per-deployment key at
    `/state/audit_ed25519_key.pem` (`O_EXCL`, `0600`) (`src/audit/keys.py`, `receipts.py`). Verify
    offline with `python -m audit.verify <bundle_dir>` (`src/audit/verify.py`).
@@ -194,7 +202,7 @@ means the model/service may exist but no endpoint wires it yet.
 | **Judge-assignment management UI** | **Shipped** — organizer console; add, or remove an **unscored** assignment (atomic + audited; a scored one is refused) | `src/judging/{views,services,urls}.py`, `templates/judging/assignments.html` |
 | **Event / team creation UI** | **Shipped** — organizer creates events, tracks, and teams in-app (the `dogfood_import` seed still works) | `src/events/{views,services,urls}.py`, `templates/events/{dashboard,detail}.html` |
 | **Rubric-weight editing** | **Shipped** — organizer sets per-criterion weights (live preview + next signed run; never rewrites a published result) | `src/judging/{views,services}.py`, `templates/judging/rubric.html` |
-| **Submission edit / withdraw** | *Planned* — the endpoint is create-only | `src/submissions/views.py` |
+| **Submission edit / withdraw** | **Shipped** — a team revises or **soft-withdraws** its own submission while the event is accepting writes (owner-gated, deadline-gated, atomic + audited); withdrawal flips state to `withdrawn` and hides it from the gallery but never deletes the row, so ballot/audit history survives | `src/submissions/{views,services,urls}.py`, `migrations/0002`, `templates/submissions/{mine,edit}.html`, `GET /submissions/mine`, `GET/POST /submissions/<id>/edit`, `POST /submissions/<id>/withdraw` |
 | **Single-use invitations** | *Not built* — no `Invite` model or flow | — |
 | **App models in Django admin** | **Shipped** — all 17 models registered; append-only/signed tables (audit, ballots, revisions, runs, publications) are inspect-only, and any row whose cascade would reach a **scored** assignment (the assignment itself, or a parent `Event`/`EventMembership`/`Submission`/`Team`/`AppUser`) refuses deletion so ballot history can't be destroyed through the admin UI (raw-DB access is the A8 operator boundary) | `src/*/admin.py`, `src/portal/admin_mixins.py` |
 | **Multi-event support** | *Limitation by design* — uses the first event | `src/*/views.py` (`_current_event`) |

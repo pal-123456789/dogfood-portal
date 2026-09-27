@@ -14,9 +14,12 @@ written to be checkable line-by-line against `src/`.
 
 - **Public project gallery** — anyone can browse submitted projects at `GET /projects`, with an
   optional `?track=` filter (`src/gallery/views.py`).
-- **Submission intake** — a participant creates a submission at `POST /projects/new`. The endpoint
-  is **create-only** and refuses writes after the event deadline; there is no edit or withdraw
-  route yet (`src/submissions/views.py`, `services.py`).
+- **Submission intake, edit & withdraw** — a participant creates a submission at `POST /projects/new`,
+  which refuses writes after the event deadline. A team can then revise or **soft-withdraw** its own
+  submission while the event is still accepting writes (`GET /submissions/mine`,
+  `GET/POST /submissions/<id>/edit`, `POST /submissions/<id>/withdraw`); withdrawal hides the project
+  from the gallery without deleting the row, so any scores and audit trail beneath it survive
+  (`src/submissions/views.py`, `services.py`).
 - **Judge reads their own scores** — a judge reads back only their own ballots at
   `GET /api/judge/scores`; requesting another judge's rows is `403` (`src/judging/views.py`).
 - **In-app judge scoring** — a judge scores the submissions assigned to them at

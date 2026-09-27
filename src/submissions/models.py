@@ -6,6 +6,12 @@ within-track duplicate (tm_07 submits "Dry Harbour" as both prj_07 and prj_41 in
 and a uniqueness guard here would crash the seed. Duplicate control lives in the
 normalizer as a diagnostic, not in a DB constraint. `title`/`summary` are load-bearing:
 check 2 reads titles off the gallery, check 3 POSTs {"title","summary"}.
+
+`WITHDRAWN` is a soft state, never a row delete: withdrawing hides the project from the
+public gallery while leaving the row (and any JudgeAssignment -> Ballot -> BallotRevision
+history and audit trail beneath it) intact. This is the same non-destructive stance the
+admin cascade guards enforce; a withdrawal is recorded as a `submission.withdrawn` audit
+event, not an erasure.
 """
 from django.db import models
 
@@ -13,8 +19,8 @@ from events.models import Event, Team, Track
 
 
 class Submission(models.Model):
-    DRAFT, SUBMITTED = "draft", "submitted"
-    STATES = [(DRAFT, "draft"), (SUBMITTED, "submitted")]
+    DRAFT, SUBMITTED, WITHDRAWN = "draft", "submitted", "withdrawn"
+    STATES = [(DRAFT, "draft"), (SUBMITTED, "submitted"), (WITHDRAWN, "withdrawn")]
 
     ext_id = models.CharField(max_length=64, unique=True)
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="submissions")

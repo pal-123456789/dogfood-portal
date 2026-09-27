@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Edit submission · Dogfood Portal{% endblock %}
+{% block content %}
+  <section class="lede">
+    <h1>Edit submission</h1>
+    <p>{% if event %}{{ event.name }} — {% endif %}{{ submission.track.name }} · {{ submission.team.name }}</p>
+  </section>
+
+  {% if withdrawn %}
+    <p class="notice">This submission has been withdrawn. It is kept for the record (its
+      scores and audit history are intact) but can no longer be edited.</p>
+  {% elif not open %}
+    <p class="notice">This event is no longer accepting changes, so this submission is
+      read-only. The fields below are shown for reference.</p>
+  {% endif %}
+
+  {% if error %}<p class="notice">{{ error }}</p>{% endif %}
+
+  <form class="stack" method="post" action="/submissions/{{ submission.ext_id }}/edit">
+    {% csrf_token %}
+    <label for="title">Title</label>
+    <input id="title" name="title" maxlength="200" value="{{ values.title }}"
+           required {% if not editable %}disabled{% endif %}>
+
+    <label for="summary">Summary</label>
+    <textarea id="summary" name="summary" rows="3"
+              {% if not editable %}disabled{% endif %}>{{ values.summary }}</textarea>
+
+    <label for="repo_url">Repository URL</label>
+    <input id="repo_url" name="repo_url" type="url" value="{{ values.repo_url }}"
+           placeholder="https://…" {% if not editable %}disabled{% endif %}>
+
+    {% if editable %}
+      <button type="submit">Save changes</button>
+    {% endif %}
+  </form>
+
+  <p><a href="/submissions/mine">← Back to my submissions</a></p>
+{% endblock %}

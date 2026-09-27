@@ -110,14 +110,17 @@ version ran; read by `verify_demo`.
 | `title` | `CharField(200)` | |
 | `summary` | `TextField` | blank default |
 | `repo_url` | `URLField(500)` | blank default |
-| `state` | `CharField(16)` | `draft` / `submitted`, default `draft` |
+| `state` | `CharField(16)` | `draft` / `submitted` / `withdrawn`, default `draft` |
 | `submitted_at` | `DateTimeField` | nullable |
 | `created_at` | `DateTimeField` | |
 
 `Meta.ordering = ["id"]`. **There is deliberately no `UNIQUE(team, track, title)`**: the fixture
 plants a within-track duplicate (`prj_07` / `prj_41`) that must import cleanly, because duplicate
-detection is a normalizer *diagnostic*, not a database guard. The write path is create-only — there
-is no edit or withdraw route yet.
+detection is a normalizer *diagnostic*, not a database guard. Beyond create, a team may revise or
+**withdraw** its own submission while the event is still accepting writes (`/submissions/<id>/edit`,
+`/submissions/<id>/withdraw`; owner- and deadline-gated, atomic + audited). Withdrawal is a soft
+state change to `withdrawn` — the row is never deleted — so it drops out of the public gallery while
+any ballot and audit history beneath it stays intact.
 
 ## `judging`
 

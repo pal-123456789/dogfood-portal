@@ -18,7 +18,11 @@ def _current_event():
 
 def projects(request):
     event = _current_event()
+    # Withdrawn projects drop out of the public gallery. No seeded row is withdrawn, so this
+    # removes nothing from the checker's view -> checks 1 & 2 stay byte-identical; it only
+    # hides a project a team later withdraws through /submissions/<id>/withdraw.
     submissions = (Submission.objects
+                   .exclude(state=Submission.WITHDRAWN)
                    .select_related("team", "track")
                    .order_by("id"))                       # oldest-first: check-2 titles on top
     active_track = request.GET.get("track") or ""
