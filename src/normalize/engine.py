@@ -141,6 +141,22 @@ def raw_means(y, sub_keys):
     return {s: acc[s] / cnt[s] for s in acc}
 
 
+def judge_means(y, judge_keys):
+    """Each judge's mean composite ballot -- the raw per-judge severity signal before pooling.
+
+    The stdev of these means is the "raw judge spread" the write-up reports as a DISPLAY-only
+    diagnostic. It is an UPPER BOUND on removable severity, never the removable part itself: in a
+    sparse panel a judge's mean also reflects WHICH submissions they happened to score, so it
+    conflates true leniency with assignment mix. Kept off the signed projection for that reason;
+    same shape as raw_means, grouped by judge instead of submission.
+    """
+    acc, cnt = {}, {}
+    for val, j in zip(y, judge_keys):
+        acc[j] = acc.get(j, 0.0) + float(val)
+        cnt[j] = cnt.get(j, 0) + 1
+    return {j: acc[j] / cnt[j] for j in acc}
+
+
 def component_gauge_error(b_by_judge, comp_by_judge):
     """Max |mean(b)| over components - ~0 (machine precision) by construction, a self-check."""
     sums, counts = {}, {}

@@ -69,3 +69,17 @@ def test_rank_report_is_deterministic():
     r1 = E.rank_report(y, jk, sk, lam=1.0, n_boot=200, seed=0)
     r2 = E.rank_report(y, jk, sk, lam=1.0, n_boot=200, seed=0)
     assert np.allclose(r1["q"], r2["q"])
+
+
+def test_judge_means_are_per_judge_composite_means():
+    # j1 sees {4,3,2} -> mean 3.0 ; j2 sees {5,4,3} -> mean 4.0. Grouped by judge, not submission.
+    y = [4.0, 3.0, 2.0, 5.0, 4.0, 3.0]
+    jk = ["j1", "j1", "j1", "j2", "j2", "j2"]
+    sk = ["s1", "s2", "s3", "s1", "s2", "s3"]
+    m = E.judge_means(y, jk)
+    assert abs(m["j1"] - 3.0) < 1e-12
+    assert abs(m["j2"] - 4.0) < 1e-12
+    # the raw judge spread the write-up reports is just the stdev of these means
+    assert abs(float(np.std(list(m.values()), ddof=1)) - np.std([3.0, 4.0], ddof=1)) < 1e-12
+    # and it groups independently of the submission axis raw_means uses
+    assert set(E.raw_means(y, sk)) == {"s1", "s2", "s3"}

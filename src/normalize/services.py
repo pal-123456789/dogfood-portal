@@ -115,6 +115,8 @@ def proof_report(event, n_boot=1000, seed=0):
     raw_resid = np.array([v - raw[s] for v, s in zip(y, sk)])
     sw_raw = float(raw_resid.std(ddof=1))
     sw_model = float((yv - pred).std(ddof=1))
+    jmeans = np.array(list(engine.judge_means(y, jk).values()))
+    raw_judge_spread = float(jmeans.std(ddof=1)) if jmeans.size > 1 else 0.0
     dup = None
     if "prj_07" in idx and "prj_41" in idx:
         dup = {"raw_gap": round(abs(raw["prj_07"] - raw["prj_41"]), 4),
@@ -126,6 +128,7 @@ def proof_report(event, n_boot=1000, seed=0):
         "lambda": float(lam),
         "lambda_table": {float(k): round(v, 4) for k, v in table.items()},
         "sigma": round(float(rep["sigma"]), 4),
+        "raw_judge_spread": round(raw_judge_spread, 4),
         "sigma_within_raw": round(sw_raw, 4),
         "sigma_within_model": round(sw_model, 4),
         "sigma_within_reduction": round(sw_raw / sw_model, 3) if sw_model else None,

@@ -40,6 +40,10 @@ class Command(BaseCommand):
             mark = "   <- selected" if lam == rep["lambda"] else ""
             w("      %-9g  %.4f%s" % (lam, rep["lambda_table"][lam], mark))
         w("  sigma (ballot noise) = %.4f" % rep["sigma"])
+        w("  raw judge spread (stdev of per-judge mean composite) = %.4f"
+          % rep["raw_judge_spread"])
+        w("      (fixture's pre-normalization severity spread; an UPPER BOUND on removable")
+        w("       severity - it conflates true leniency with each judge's assignment mix)")
         w("  within-submission sigma: raw=%.4f  model=%.4f  reduction=%.3fx"
           % (rep["sigma_within_raw"], rep["sigma_within_model"], rep["sigma_within_reduction"]))
         w("  top-1 by raw mean     = %s" % rep["top_raw"])

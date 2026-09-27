@@ -129,6 +129,14 @@ class NormalizeServiceTests(TestCase):
                          [r["submission"] for r in b["rows"]])
         self.assertEqual([r["q"] for r in a["rows"]], [r["q"] for r in b["rows"]])
 
+    def test_raw_judge_spread_is_stdev_of_per_judge_means(self):
+        # Judges score every submission with bias {0, +1, -1} about base {4,3,2},
+        # so per-judge mean composites are {3.0, 4.0, 2.0} and their sample stdev is exactly 1.0.
+        rep = services.proof_report(self.event, n_boot=100)
+        self.assertAlmostEqual(rep["raw_judge_spread"], 1.0, places=6)
+        # display-only diagnostic: it must NOT leak into the signed leaderboard projection
+        self.assertNotIn("raw_judge_spread", services.leaderboard(self.event, n_boot=100))
+
     def test_gate_anonymous_401(self):
         c = Client()
         self.assertEqual(c.get("/normalize/").status_code, 401)
