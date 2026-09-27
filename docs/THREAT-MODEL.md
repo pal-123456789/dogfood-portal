@@ -167,6 +167,8 @@ What is now shipped is **detection**, with a caveat stated precisely so it is no
 
 The caveat: a chain and a signing key that **both live on the operator's own host do not bind the operator.** An operator who rewrites history can re-sign a fresh, self-consistent checkpoint over it. Detection is therefore only as strong as a **checkpoint that left the operator's control *before* the disputed change** and is independently retained and later compared — e.g. a fingerprint published to participants, or a checkpoint bundle emailed out at freeze. Given such an external anchor, a later divergence is provable; without one, operator tampering is detectable only if the operator was careless. That is the honest posture, and the signed-checkpoint export exists precisely to make the external anchor cheap to produce.
 
+That anchor now ships in its most complete form (commit `fc648da`): `manage.py release_bundle <dir>` writes **one signed directory** binding the published `ranking.csv`, the signed reproducible run (A6), the `normalization.published` event that finalized it, and the signed audit checkpoint (A7) — all under one operator key — and a single offline command, `python -m normalize.release <dir>`, re-runs *both* the audit and the run verifiers unchanged and then cross-links them: it confirms the checkpoint and run share one signer, that the run's finalization is an event actually committed in the signed chain (its `audit_seq` is unsigned, so it is validated here, never trusted), that this event sits at or below the signed checkpoint head, and that `ranking.csv` is byte-for-byte the signed result. The anchor an independent party pins before judging is thus a single artifact rather than three. The caveat is unchanged and load-bearing: because the operator holds the key, a PASS is decisive only against a public key + fingerprint pinned by an independent party **before** judging and a checkpoint they retained — the bundle recomputes and cross-checks; it cannot bind the operator by itself.
+
 ### A9 — Account takeover, sessions, and secrets · mostly SHIPPED
 
 - **Admin credentials.** The bootstrap generates a random admin password when none is supplied and prints it once; there is no baked-in default. SHIPPED.
@@ -206,7 +208,7 @@ Every event-scoped view resolves "the current event" as the single event in the 
 
 The controls this build does **not** ship, stated plainly. This list is the point: a reviewer should trust the SHIPPED labels above precisely because these are not hidden among them.
 
-*Shipped since the first draft.* Three items once on this list are now built and tested, so they have left it: the append-only, hash-chained **audit log** (A7, A8; commit `edb35c8`); **append-only ballot history** — the immutable `BallotRevision` table (A7; commit `d1c60fc`); and a **signed, reproducible normalization run** with an offline verifier (A6; `src/normalize/runs.py`, `src/normalize/verify.py`). What remains below is genuinely not in the build.
+*Shipped since the first draft.* Items once on this list are now built and tested, so they have left it: the append-only, hash-chained **audit log** (A7, A8; commit `edb35c8`); **append-only ballot history** — the immutable `BallotRevision` table (A7; commit `d1c60fc`); a **signed, reproducible normalization run** with an offline verifier (A6; `src/normalize/runs.py`, `src/normalize/verify.py`); and, binding all of these into one artifact, a **signed release bundle** — the published ranking, its signed run, and the signed audit checkpoint in a single directory — with one offline verifier for the whole chain of custody (A8; commit `fc648da`, `manage.py release_bundle` + `python -m normalize.release`). What remains below is genuinely not in the build.
 
 1. **Rate-limit enforcement** — policy configured (`DOGFOOD_RATE_LIMITS`), no code consumes it. DESIGN ONLY.
 2. **Login throttling / lockout** — not implemented. DESIGN ONLY.
@@ -230,6 +232,8 @@ docker compose exec -T -w /app/src web python manage.py test   # DB-backed isola
 docker compose exec -T -w /app/src web python manage.py audit_verify   # recompute the live audit chain in place
 docker compose exec -T -w /app/src web python manage.py normalize_publish --export /tmp/nbundle   # sign a reproducible run, then self-verify
 docker compose exec -T -w /app/src web python -m normalize.verify /tmp/nbundle             # re-run the estimator from pinned inputs, offline
+docker compose exec -T -w /app/src web python manage.py release_bundle /tmp/release         # ONE signed bundle: ranking + run + audit checkpoint
+docker compose exec -T -w /app/src web python -m normalize.release /tmp/release             # verify the whole chain of custody, offline
 python3 tools/replay.py                                        # the 7 acceptance checks, no redirects
 ```
 
@@ -243,6 +247,7 @@ python3 tools/replay.py                                        # the 7 acceptanc
 | A6 estimator determinism + signed reproducible run | `tests/test_normalize_engine.py`, `tests/test_normalize_signing.py`; `manage.py test`; `manage.py normalize_publish --export <dir>` + offline `python -m normalize.verify <dir>` |
 | A7/A8 tamper-evident audit chain + signed checkpoint | `src/audit/tests.py` (6, via `manage.py test audit`); `manage.py audit_verify`; `manage.py audit_export` + offline `audit/verify.py` |
 | A7 append-only ballot history | `src/judging/tests.py` (via `manage.py test judging`); `src/judging/models.py` `BallotRevision` |
+| A6+A7+A8 unified signed release bundle (ranking + run + audit checkpoint, one dir) | `src/normalize/tests.py` `ReleaseBundleTests` / `ReleaseVerifyPureTests` (via `manage.py test`); `manage.py release_bundle <dir>` + offline `python -m normalize.release <dir>` |
 | A11 official results: private until published + append-only versions | `src/normalize/tests.py` `ResultPublicationTests` (via `manage.py test`); published run verifies via A6 `python -m normalize.verify` |
 | CSP / middleware wired | `tests/test_smoke.py` |
 | No raw SQL, no upload surface | grep `\.raw(` / `request.FILES` → none |
