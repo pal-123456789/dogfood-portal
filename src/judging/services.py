@@ -44,6 +44,34 @@ def scores_for_judge(membership):
     } for b in qs]
 
 
+def assigned_submissions(membership):
+    """The judge's assigned submissions with their current Ballot (or None), for the scoring
+    queue. A judge scores only what they are assigned to, so this queryset is also the set of
+    submissions the score endpoint will accept a write for."""
+    qs = (JudgeAssignment.objects
+          .filter(judge=membership)
+          .select_related("submission", "submission__track", "ballot")
+          .order_by("submission__ext_id"))
+    rows = []
+    for a in qs:
+        try:
+            ballot = a.ballot                      # reverse OneToOne; may not exist yet
+        except Ballot.DoesNotExist:
+            ballot = None
+        rows.append({"submission": a.submission, "ballot": ballot})
+    return rows
+
+
+def assignment_for(membership, submission_ext_id):
+    """The judge's assignment for this submission ext_id, or None if it is not assigned to them.
+    Ownership is a property of the data (an existing JudgeAssignment row), never of the URL."""
+    if not submission_ext_id:
+        return None
+    return (JudgeAssignment.objects
+            .filter(judge=membership, submission__ext_id=submission_ext_id)
+            .select_related("submission").first())
+
+
 def record_ballot(membership, submission, *, functionality, quality, innovation, comment=""):
     """Append the caller's score for a submission as an immutable revision; enforce 1..5.
 

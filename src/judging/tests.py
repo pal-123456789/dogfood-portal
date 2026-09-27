@@ -12,7 +12,8 @@ from datetime import timedelta
 
 from django.db import IntegrityError, transaction
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from django.urls import reverse
 from django.utils import timezone
 
 from audit.models import AuditEvent
@@ -93,3 +94,94 @@ class BallotVersioningTests(TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual((rows[0]["functionality"], rows[0]["quality"],
                           rows[0]["innovation"]), (1, 2, 3))
+
+
+_RATES = {"login": "10/m", "invite_redeem": "20/h",
+          "submission_write": "60/h", "ballot_write": "2/h"}
+_LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+
+class ScoreEndpointTests(TestCase):
+    """The in-app judge scoring page (GET/POST /judging/score). Proves the write path is
+    judge-only, assignment-scoped, append-only + audited, and throttled -- without touching the
+    five flat checker routes."""
+
+    def setUp(self):
+        self.url = reverse("judging:score")
+        self.assertEqual(self.url, "/judging/score")           # ordering vs the flat routes
+        self.event = Event.objects.create(
+            ext_id="evt_s", name="S", state=Event.CLOSED,
+            submissions_close=timezone.now() - timedelta(days=1))
+        self.trk = Track.objects.create(ext_id="trk_s", event=self.event, name="S")
+        self.team = Team.objects.create(ext_id="tm_s", event=self.event, name="S")
+        self.assigned = Submission.objects.create(
+            ext_id="prj_assigned", event=self.event, team=self.team, track=self.trk,
+            title="Assigned Project", state=Submission.SUBMITTED)
+        self.unassigned = Submission.objects.create(
+            ext_id="prj_unassigned", event=self.event, team=self.team, track=self.trk,
+            title="Unassigned Project", state=Submission.SUBMITTED)
+        self.judge_user = User.objects.create_user(email="judge@x.com", password="pw")
+        self.judge = EventMembership.objects.create(
+            user=self.judge_user, event=self.event, role=EventMembership.JUDGE, ext_id="jdg_s")
+        JudgeAssignment.objects.create(judge=self.judge, submission=self.assigned)
+        self.outsider = User.objects.create_user(email="outsider@x.com", password="pw")
+
+    def _post(self, **over):
+        data = {"submission": self.assigned.ext_id, "functionality": "5",
+                "quality": "4", "innovation": "3", "comment": "solid"}
+        data.update(over)
+        return self.client.post(self.url, data)
+
+    def test_get_lists_only_assigned_submissions(self):
+        self.client.force_login(self.judge_user)
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Assigned Project")
+        self.assertNotContains(resp, "Unassigned Project")
+
+    def test_post_records_ballot_revision_and_audit(self):
+        self.client.force_login(self.judge_user)
+        resp = self._post()
+        self.assertEqual(resp.status_code, 302)                       # PRG
+        self.assertEqual(Ballot.objects.count(), 1)
+        ballot = Ballot.objects.get()
+        self.assertEqual((ballot.functionality, ballot.quality, ballot.innovation), (5, 4, 3))
+        self.assertEqual([r.version for r in ballot.revisions.order_by("version")], [1])
+        self.assertTrue(AuditEvent.objects.filter(event_type="ballot.recorded").exists())
+        # a second write appends v2 and moves the latest-pointer -- history is preserved
+        self._post(functionality="2", quality="2", innovation="1")
+        ballot.refresh_from_db()
+        self.assertEqual((ballot.functionality, ballot.quality, ballot.innovation), (2, 2, 1))
+        self.assertEqual([r.version for r in ballot.revisions.order_by("version")], [1, 2])
+
+    def test_out_of_range_score_is_400_and_writes_nothing(self):
+        self.client.force_login(self.judge_user)
+        resp = self._post(functionality="6")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Ballot.objects.count(), 0)
+
+    def test_cannot_score_a_submission_not_assigned_to_you(self):
+        self.client.force_login(self.judge_user)
+        resp = self._post(submission=self.unassigned.ext_id)
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(Ballot.objects.filter(
+            assignment__submission=self.unassigned).exists())
+
+    def test_non_judge_is_forbidden(self):
+        self.client.force_login(self.outsider)
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+        self.assertEqual(self._post().status_code, 403)
+
+    def test_anonymous_is_redirected_to_login(self):
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(resp["Location"].startswith("/accounts/login/"))
+
+    @override_settings(CACHES=_LOCMEM, DOGFOOD_RATE_LIMITS=_RATES)
+    def test_rate_limited_after_quota(self):
+        self.client.force_login(self.judge_user)
+        self.assertEqual(self._post().status_code, 302)               # 1/2
+        self.assertEqual(self._post().status_code, 302)               # 2/2
+        resp = self._post()                                           # 3rd -> over
+        self.assertEqual(resp.status_code, 429)
+        self.assertIn("Retry-After", resp)

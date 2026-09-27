@@ -1,17 +1,26 @@
 # src/judging/views.py
-"""T2 read surface: the judge scores API and the organizer CSV export.
+"""Judging HTTP surface: the read API + the organizer CSV export, plus the in-app judge
+scoring page.
 
 The crux (checks 4/5/6): /api/judge/scores returns the CALLER'S own ballots. A `judge=`
 query param naming anyone but the caller is 403 (ownership is the membership, not the URL);
 a non-judge caller is 403; an unauthenticated caller is 401. check 7: only an organizer may
-export, and the CSV's header line carries commas.
+export, and the CSV's header line carries commas. The `score` view (GET/POST /judging/score)
+is the human write path and is NOT on the checker's route list.
 """
 import csv
 
+from django.conf import settings
+from django.contrib.auth.views import redirect_to_login
+from django.core.exceptions import ValidationError
 from django.http import HttpResponse, JsonResponse
-from django.views.decorators.http import require_GET
+from django.shortcuts import redirect, render
+from django.urls import reverse
+from django.views.decorators.http import require_GET, require_http_methods
 
 from events.models import Event, EventMembership
+
+from portal import ratelimit
 
 from . import services
 
@@ -65,3 +74,64 @@ def export_csv(request):
     for row in services.export_event_rows(event):
         writer.writerow(row)
     return response                                                                # check 7
+
+
+@require_http_methods(["GET", "POST"])
+def score(request):
+    """In-app judge scoring (the human write surface for judging).
+
+    Not on the acceptance checker's path -- the checker only reads /api/judge/scores. This is a
+    real judge scoring their assigned queue: GET renders the queue with the current score
+    pre-filled; POST writes one submission's score through record_ballot (append-only revision +
+    audit event, atomically). Authorization is the same event-scoped rule as judge_scores -- a
+    judge membership for the current event -- and a judge may only score a submission they are
+    ASSIGNED to (an existing JudgeAssignment row), never an arbitrary project id from the form.
+
+    Real judges are throttled per user by DOGFOOD_RATE_LIMITS['ballot_write']; the DEMO shim is
+    exempt (mirrors submit()), and the limiter fails open. Anonymous callers are sent to the login
+    page rather than getting a bare 401, because this is a browser page for people.
+    """
+    event = _current_event()
+    if event is None:
+        return HttpResponse("no event configured", status=404)
+    if not request.user.is_authenticated:
+        return redirect_to_login(request.get_full_path(), settings.LOGIN_URL)
+    membership = services.judge_membership(request.user, event)
+    if membership is None:
+        return HttpResponse("judges only", status=403)
+
+    def _render(extra=None, status=200):
+        ctx = {"event": event, "membership": membership,
+               "rows": services.assigned_submissions(membership),
+               "scale": range(1, 6), "saved": request.GET.get("saved", "")}
+        if extra:
+            ctx.update(extra)
+        return render(request, "judging/score.html", ctx, status=status)
+
+    if request.method == "GET":
+        return _render()
+
+    # Abuse control for real judges; the DEMO shim (if ever used here) is EXEMPT, matching submit().
+    if not getattr(request, "demo_shim", False):
+        allowed, retry = ratelimit.hit(
+            "ballot_write:%s" % request.user.pk,
+            settings.DOGFOOD_RATE_LIMITS["ballot_write"])
+        if not allowed:
+            resp = _render({"error": "Too many score submissions. Please slow down."}, status=429)
+            resp["Retry-After"] = str(retry)
+            return resp
+
+    assignment = services.assignment_for(membership, request.POST.get("submission", ""))
+    if assignment is None:
+        return HttpResponse("not assigned to you", status=403)   # ownership is the data, not the URL
+    try:
+        services.record_ballot(
+            membership, assignment.submission,
+            functionality=request.POST.get("functionality"),
+            quality=request.POST.get("quality"),
+            innovation=request.POST.get("innovation"),
+            comment=(request.POST.get("comment") or "").strip())
+    except ValidationError as e:
+        return _render({"error": " ".join(e.messages)}, status=400)
+    # Post/redirect/get: a refresh must not silently re-record a ballot.
+    return redirect("%s?saved=%s" % (reverse("judging:score"), assignment.submission.ext_id))

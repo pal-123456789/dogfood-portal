@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Judge scoring — dogfood portal{% endblock %}
+{% block content %}
+<div class="lede">
+  <h1>Judge scoring</h1>
+  <p>Signed in as judge <code>{{ membership.ext_id }}</code> ·
+     {{ rows|length }} assigned submission{{ rows|length|pluralize }}.</p>
+</div>
+
+{% if error %}<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">{{ error }}</div>{% endif %}
+{% if saved %}<div class="notice">Saved your score for <code>{{ saved }}</code>.</div>{% endif %}
+
+{% if rows %}
+  {% for row in rows %}
+  <div class="card" style="margin-bottom:14px">
+    <h3>{{ row.submission.title }}</h3>
+    <div class="meta">
+      <span class="tag">{{ row.submission.track.ext_id }}</span>
+      <span class="tag">{{ row.submission.ext_id }}</span>
+      {% if row.ballot %}<span class="tag">scored</span>{% else %}<span class="tag">pending</span>{% endif %}
+    </div>
+    <form class="stack" method="post" action="/judging/score">
+      {% csrf_token %}
+      <input type="hidden" name="submission" value="{{ row.submission.ext_id }}">
+      <label>Functionality (1–5)
+        <select name="functionality">
+          {% for n in scale %}<option value="{{ n }}"{% if row.ballot and row.ballot.functionality == n %} selected{% endif %}>{{ n }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Quality (1–5)
+        <select name="quality">
+          {% for n in scale %}<option value="{{ n }}"{% if row.ballot and row.ballot.quality == n %} selected{% endif %}>{{ n }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Innovation (1–5)
+        <select name="innovation">
+          {% for n in scale %}<option value="{{ n }}"{% if row.ballot and row.ballot.innovation == n %} selected{% endif %}>{{ n }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Comment
+        <textarea name="comment" rows="2">{% if row.ballot %}{{ row.ballot.comment }}{% endif %}</textarea>
+      </label>
+      <button type="submit">{% if row.ballot %}Update score{% else %}Submit score{% endif %}</button>
+    </form>
+  </div>
+  {% endfor %}
+{% else %}
+  <p class="empty">You have no assigned submissions yet. Assignments are configured by an organizer.</p>
+{% endif %}
+{% endblock %}
