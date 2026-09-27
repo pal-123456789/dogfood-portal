@@ -63,6 +63,22 @@ def record_ballot(membership, submission, *, functionality, quality, innovation,
     return ballot
 
 
+# CSV formula-injection guard (CWE-1236). A spreadsheet evaluates any cell whose first
+# character is one of these, so an attacker-controlled title or comment like
+# `=HYPERLINK("http://evil","click")` would run when an organizer opens export.csv. csv.writer
+# quotes delimiters but does NOT neutralise formulas, so we prefix such cells with an
+# apostrophe -- shown as-is by spreadsheets, but no longer parsed as a formula. Data cells
+# only; the header row is static and check 7 only needs commas on line 1, which is unaffected.
+_CSV_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value):
+    """Neutralise one cell against spreadsheet-formula injection; non-strings pass through."""
+    if isinstance(value, str) and value[:1] in _CSV_FORMULA_LEAD:
+        return "'" + value
+    return value
+
+
 def export_event_rows(event):
     """Rows for the organizer CSV export; header first so line 1 always has commas (check 7)."""
     rows = [["submission", "title", "team", "track", "judge",
@@ -74,7 +90,8 @@ def export_event_rows(event):
           .order_by("assignment__submission__ext_id", "assignment__judge__ext_id"))
     for b in qs:
         s = b.assignment.submission
-        rows.append([s.ext_id, s.title, s.team.ext_id, s.track.ext_id,
-                     b.assignment.judge.ext_id,
-                     b.functionality, b.quality, b.innovation, b.comment])
+        rows.append([_csv_safe(v) for v in (
+            s.ext_id, s.title, s.team.ext_id, s.track.ext_id,
+            b.assignment.judge.ext_id,
+            b.functionality, b.quality, b.innovation, b.comment)])
     return rows

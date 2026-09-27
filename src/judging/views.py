@@ -34,11 +34,16 @@ def judge_scores(request):
     if requested and requested != membership.ext_id:                               # check 5
         return JsonResponse({"detail": "cannot read another judge's scores"}, status=403)
     scores = services.scores_for_judge(membership)                                 # check 4
-    return JsonResponse({
+    response = JsonResponse({
         "judge": membership.ext_id,
         "count": len(scores),
         "scores": scores,
     })
+    # Private per-caller data: never let a shared/proxy cache serve one judge's rows to
+    # another. Harmless to the checker -- status and body are unchanged, it only adds headers.
+    response["Cache-Control"] = "private, no-store"
+    response["Vary"] = "Cookie"
+    return response
 
 
 @require_GET
@@ -54,6 +59,8 @@ def export_csv(request):
         return HttpResponse("organizer only", status=403)
     response = HttpResponse(content_type="text/csv")
     response["Content-Disposition"] = 'attachment; filename="export.csv"'
+    response["Cache-Control"] = "private, no-store"
+    response["Vary"] = "Cookie"
     writer = csv.writer(response)
     for row in services.export_event_rows(event):
         writer.writerow(row)
