@@ -17,7 +17,7 @@ from django.utils.dateparse import parse_datetime
 from accounts.models import DemoSession
 from events.models import (BootstrapState, Event, EventMembership, Team,
                            TeamMember, Track)
-from judging.models import Ballot, JudgeAssignment, RubricWeight
+from judging.models import Ballot, BallotRevision, JudgeAssignment, RubricWeight
 from submissions.models import Submission
 
 User = get_user_model()
@@ -139,8 +139,20 @@ class Command(BaseCommand):
                 judge=judge_membership_by_ext[s["judge"]],
                 submission=submission_by_ext[s["project"]])
             c = s["criteria"]
-            Ballot.objects.get_or_create(
+            ballot, _ = Ballot.objects.get_or_create(
                 assignment=assignment,
+                defaults=dict(
+                    functionality=c["functionality"],
+                    quality=c["quality"],
+                    innovation=c["innovation"],
+                    comment=s.get("comment", ""),
+                ),
+            )
+            # Seed the append-only v1 revision alongside the ballot (idempotent: keyed on
+            # (ballot, version=1)). A fresh DB gets its v1 rows here; an upgraded DB got them
+            # from migration 0002's backfill -- the two paths are disjoint and never collide.
+            BallotRevision.objects.get_or_create(
+                ballot=ballot, version=1,
                 defaults=dict(
                     functionality=c["functionality"],
                     quality=c["quality"],

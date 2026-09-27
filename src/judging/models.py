@@ -1,11 +1,20 @@
 # src/judging/models.py
-"""Judging: who may score what (JudgeAssignment), and the score itself (Ballot).
+"""Judging: who may score what (JudgeAssignment), the current score (Ballot), and the
+append-only history behind it (BallotRevision).
 
 Scores are integers 1..5 per criterion (functionality, quality, innovation), matching the
-fixture and the spec rubric. The 1..5 bound is enforced in the record_ballot service
-(judging/services.py); a DB CheckConstraint is added in a later, non-destructive migration.
-One ballot per assignment (OneToOne). Assignment ownership — not the URL — decides who can
-read a ballot, which is the crux of checks 4/5/6.
+fixture and the spec rubric. The 1..5 bound is enforced three ways, deepest last: in the
+record_ballot service (judging/services.py), and — as of migration 0002 — by a DB
+CheckConstraint on BOTH Ballot and every BallotRevision, so a value outside 1..5 cannot be
+persisted even by a writer that bypasses the service.
+
+One ballot per assignment (OneToOne); Ballot holds the CURRENT (latest) score as a
+denormalized read-pointer so existing readers stay byte-identical. Every write also appends
+an immutable BallotRevision (UNIQUE(ballot, version)); revisions are never updated or
+deleted, so the full score history is reconstructable and a silent overwrite is impossible
+to hide — the tamper-evident audit chain records each `ballot.recorded` event with its
+version. Assignment ownership — not the URL — decides who can read a ballot, which is the
+crux of checks 4/5/6.
 """
 from django.db import models
 
@@ -43,9 +52,46 @@ class Ballot(models.Model):
 
     class Meta:
         db_table = "ballot"
+        constraints = [
+            models.CheckConstraint(
+                condition=(models.Q(functionality__range=(1, 5))
+                           & models.Q(quality__range=(1, 5))
+                           & models.Q(innovation__range=(1, 5))),
+                name="ck_ballot_scores_1_5"),
+        ]
 
     def __str__(self):
         return "ballot#%s" % self.pk
+
+
+class BallotRevision(models.Model):
+    """One immutable score revision. Append-only: rows are never updated or deleted, and
+    UNIQUE(ballot, version) makes each version write-once, so the DB itself refuses a silent
+    overwrite of history. Ballot mirrors the highest-version row as its denormalized current
+    value; the audit chain records the matching version on every `ballot.recorded` event.
+    """
+    ballot = models.ForeignKey(Ballot, on_delete=models.CASCADE, related_name="revisions")
+    version = models.PositiveIntegerField()
+    functionality = models.PositiveSmallIntegerField()
+    quality = models.PositiveSmallIntegerField()
+    innovation = models.PositiveSmallIntegerField()
+    comment = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "ballot_revision"
+        constraints = [
+            models.UniqueConstraint(fields=["ballot", "version"],
+                                    name="uniq_ballot_version"),
+            models.CheckConstraint(
+                condition=(models.Q(functionality__range=(1, 5))
+                           & models.Q(quality__range=(1, 5))
+                           & models.Q(innovation__range=(1, 5))),
+                name="ck_ballotrevision_scores_1_5"),
+        ]
+
+    def __str__(self):
+        return "ballot#%s v%s" % (self.ballot_id, self.version)
 
 
 class RubricWeight(models.Model):

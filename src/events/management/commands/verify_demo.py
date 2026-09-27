@@ -12,10 +12,10 @@ from django.utils import timezone
 
 from accounts.models import DemoSession
 from events.models import BootstrapState, Event, EventMembership, Team, Track
-from judging.models import Ballot
+from judging.models import Ballot, BallotRevision
 from submissions.models import Submission
 
-EXPECT = dict(tracks=8, judges=30, teams=40, projects=41, ballots=126)
+EXPECT = dict(tracks=8, judges=30, teams=40, projects=41, ballots=126, ballot_revisions=126)
 DEMO_TOKENS = ("org_7f2a", "jdg_a_91bc", "jdg_b_44de", "prt_2e88")
 
 
@@ -56,9 +56,24 @@ class Command(BaseCommand):
             teams=Team.objects.filter(event=event).count(),
             projects=Submission.objects.filter(event=event).count(),
             ballots=Ballot.objects.filter(assignment__submission__event=event).count(),
+            ballot_revisions=BallotRevision.objects.filter(
+                ballot__assignment__submission__event=event).count(),
         )
         for k, v in EXPECT.items():
             check("count %s == %d" % (k, v), got[k] == v, "got %d" % got[k])
+
+        # every seeded ballot has exactly its append-only v1 (no orphan ballot, no stray
+        # higher version at seed time) -- proves the revision history was wired, not faked.
+        seed_revs = BallotRevision.objects.filter(
+            ballot__assignment__submission__event=event)
+        check("all seed revisions are v1",
+              seed_revs.exclude(version=1).count() == 0,
+              "non-v1=%d" % seed_revs.exclude(version=1).count())
+        ballots_without_v1 = (Ballot.objects
+                              .filter(assignment__submission__event=event)
+                              .exclude(revisions__version=1).count())
+        check("every ballot has a v1 revision", ballots_without_v1 == 0,
+              "missing=%d" % ballots_without_v1)
 
         # 3) the four demo cookies resolve to the intended role (the #1 landmine)
         sess = {s.token: s.user for s in DemoSession.objects.select_related("user")}

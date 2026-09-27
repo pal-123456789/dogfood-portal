@@ -8,12 +8,13 @@ ownership rule must be a property of the data layer.
 """
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import Max
 
 from events.models import EventMembership
 
 from audit import service as audit_service
 
-from .models import Ballot, JudgeAssignment
+from .models import Ballot, BallotRevision, JudgeAssignment
 
 SCORE_MIN, SCORE_MAX = 1, 5
 
@@ -44,12 +45,16 @@ def scores_for_judge(membership):
 
 
 def record_ballot(membership, submission, *, functionality, quality, innovation, comment=""):
-    """Create/replace the caller's ballot for a submission; enforce the 1..5 bound.
+    """Append the caller's score for a submission as an immutable revision; enforce 1..5.
 
     Not on the acceptance checker's path (its T2 is read-only), but it is the single writer
-    the DB CheckConstraint (a later migration) mirrors, so the rule is stated once here. The
-    write and its audit event share ONE transaction (audit/service.record_event), so a score
-    can never be persisted without its tamper-evident audit row, nor vice versa.
+    the DB CheckConstraints mirror, so the rule is stated once here. Three things happen in
+    ONE transaction so none can exist without the others: the Ballot row is updated to the
+    latest score (a denormalized read-pointer, kept byte-stable for existing readers), a
+    write-once BallotRevision is appended (UNIQUE(ballot, version) is the append-only
+    backstop; the audit-head lock in record_event already serializes the common path), and a
+    tamper-evident `ballot.recorded` audit event carrying that version is chained. A score can
+    never be persisted without both its history row and its audit row, nor vice versa.
     """
     for name, val in (("functionality", functionality),
                       ("quality", quality), ("innovation", innovation)):
@@ -66,11 +71,17 @@ def record_ballot(membership, submission, *, functionality, quality, innovation,
             assignment=assignment,
             defaults=dict(functionality=int(functionality), quality=int(quality),
                           innovation=int(innovation), comment=comment))
+        version = (ballot.revisions.aggregate(m=Max("version"))["m"] or 0) + 1
+        BallotRevision.objects.create(
+            ballot=ballot, version=version,
+            functionality=int(functionality), quality=int(quality),
+            innovation=int(innovation), comment=comment)
         audit_service.record_event(
             event_type="ballot.recorded", object_type="ballot",
             object_id="%s:%s" % (membership.ext_id or membership.pk, submission.ext_id),
             actor_user_id=membership.user_id, actor_membership_id=membership.ext_id,
             payload={"submission": submission.ext_id, "judge": membership.ext_id,
+                     "version": version,
                      "functionality": int(functionality), "quality": int(quality),
                      "innovation": int(innovation)})
     return ballot
