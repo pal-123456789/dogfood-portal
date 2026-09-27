@@ -4,12 +4,15 @@ through the service, mapping domain errors to status codes. The acceptance check
 to a CLOSED event, so it exercises the SubmissionsClosed -> 4xx path (check 3).
 """
 from django.core.exceptions import PermissionDenied
+from django.conf import settings
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
 from events.models import Event, Track
+
+from portal import ratelimit
 
 from . import services
 
@@ -33,6 +36,19 @@ def submit(request):
 
     if not request.user.is_authenticated:
         return JsonResponse({"detail": "authentication required"}, status=401)
+
+    # Abuse control for real logged-in users. The DEMO shim (the acceptance checker) is EXEMPT:
+    # its request carries `request.demo_shim`, so the checker's POST to /projects/new is never
+    # rate-limited and check 3's response stays byte-identical no matter how often it runs. Real
+    # users over DOGFOOD_RATE_LIMITS['submission_write'] get 429; the limiter fails open.
+    if not getattr(request, "demo_shim", False):
+        allowed, retry = ratelimit.hit(
+            "submission_write:%s" % request.user.pk,
+            settings.DOGFOOD_RATE_LIMITS["submission_write"])
+        if not allowed:
+            resp = JsonResponse({"detail": "rate limited"}, status=429)
+            resp["Retry-After"] = str(retry)
+            return resp
 
     track = Track.objects.filter(event=event, ext_id=request.POST.get("track", "")).first()
     try:

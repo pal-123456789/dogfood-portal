@@ -176,15 +176,15 @@ That anchor now ships in its most complete form (commit `fc648da`): `manage.py r
 - **Passwords.** Django PBKDF2 with the stock validators; email is the identity, unique case-insensitively. SHIPPED.
 - **Transport.** `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE`, SSL redirect and HSTS switch on behind `DOGFOOD_TLS` for a real deployment. SHIPPED (flag-gated).
 - **Demo auth (the one caveat).** For the offline grader, a `DOGFOOD_DEMO` shim maps a `session=` cookie to a seeded user and exempts CSRF so the stdlib checker can drive the API. This is a bearer-token shim: anyone holding a seeded token acts as that user, and CSRF is not enforced for it. It is **gated entirely off** in production (`DOGFOOD_DEMO=0`, the default in a real deploy), the `DemoSession` table is empty in production, and the middleware logs a loud warning when on. ACCEPTED RISK, scoped to the demo stack; never enable it on a public host.
-- **Login throttling.** DESIGN ONLY — see §9.
+- **Login throttling.** SHIPPED. `POST /accounts/login/` is throttled per client IP (`REMOTE_ADDR`) via `DOGFOOD_RATE_LIMITS['login']` (default 10/min) over the shared cache; over the limit it returns **429 with `Retry-After`**. This is a *throttle*, not a *lockout*: it slows credential stuffing without letting an attacker lock a victim out by guessing at them (the window resets on its own). The limiter fails open (§A10). Covered by `src/accounts/tests.py`. Persistent per-account lockout remains DESIGN ONLY — see §9.
 
 ### A10 — Resource exhaustion / denial of service · partial
 
-*What holds.* There is no file-upload surface (grep-clean: no `FileField` / `request.FILES`), and no raw SQL anywhere (ORM-only), so two common amplification vectors are absent. The rate-limit cache is backed by the **database** (`DatabaseCache`), deliberately not per-process `LocMemCache`, so a limiter would count correctly across workers *if wired*.
+*What holds.* There is no file-upload surface (grep-clean: no `FileField` / `request.FILES`), and no raw SQL anywhere (ORM-only), so two common amplification vectors are absent. The rate-limit cache is backed by the **database** (`DatabaseCache`), deliberately not per-process `LocMemCache`, so the limiter counts correctly across all workers rather than once per process.
 
-*What does not.* The gallery is intentionally **un-paginated** (checks 1/2 require the full list), so it is bounded by fixture size rather than by a clamp — acceptable at event scale, ACCEPTED RISK at large scale. And the `DOGFOOD_RATE_LIMITS` policy exists in settings but **nothing consumes it** — rate-limit *enforcement* is DESIGN ONLY, the config being scaffolding for a limiter not built.
+*What does not.* The gallery is intentionally **un-paginated** (checks 1/2 require the full list), so it is bounded by fixture size rather than by a clamp — acceptable at event scale, ACCEPTED RISK at large scale. And rate-limit *enforcement* is now **partial**: the fixed-window limiter `src/portal/ratelimit.py` (fail-open — a limiter outage must not become an availability outage) is wired into the two write surfaces that actually exist for real users — `login` (per IP, §A9) and `submission_write` (per authenticated user, with the DEMO/checker path exempt so the five checker routes stay byte-exact) — each returning 429 + `Retry-After` over the limit. The other two policy keys, `ballot_write` and `invite_redeem`, are **not consumed**, because neither has an HTTP route in this build (ballots are written through the service layer only; invitations are §9 item 4). Those two stay DESIGN ONLY; the primitive and the policy are ready for them the day those routes land.
 
-*Verify.* grep for `request.FILES` / `.raw(` / `RATE_LIMIT` — only the settings dict matches.
+*Verify.* grep for `request.FILES` / `.raw(` → none. The limiter and its two live call sites: `src/portal/ratelimit.py`, and `ratelimit.hit(` in `accounts/views.py` and `submissions/views.py`; covered by `tests/test_ratelimit.py` (parser, fixed window, fail-open), `src/accounts/tests.py`, and `src/submissions/tests.py` (including the DEMO-exempt byte-stability case).
 
 ### A11 — Premature or unofficial results disclosure · SHIPPED · PREVENT (user boundary)
 
@@ -208,10 +208,10 @@ Every event-scoped view resolves "the current event" as the single event in the 
 
 The controls this build does **not** ship, stated plainly. This list is the point: a reviewer should trust the SHIPPED labels above precisely because these are not hidden among them.
 
-*Shipped since the first draft.* Items once on this list are now built and tested, so they have left it: the append-only, hash-chained **audit log** (A7, A8; commit `edb35c8`); **append-only ballot history** — the immutable `BallotRevision` table (A7; commit `d1c60fc`); a **signed, reproducible normalization run** with an offline verifier (A6; `src/normalize/runs.py`, `src/normalize/verify.py`); and, binding all of these into one artifact, a **signed release bundle** — the published ranking, its signed run, and the signed audit checkpoint in a single directory — with one offline verifier for the whole chain of custody (A8; commit `fc648da`, `manage.py release_bundle` + `python -m normalize.release`). What remains below is genuinely not in the build.
+*Shipped since the first draft.* Items once on this list are now built and tested, so they have left it: the append-only, hash-chained **audit log** (A7, A8; commit `edb35c8`); **append-only ballot history** — the immutable `BallotRevision` table (A7; commit `d1c60fc`); a **signed, reproducible normalization run** with an offline verifier (A6; `src/normalize/runs.py`, `src/normalize/verify.py`); binding all of these into one artifact, a **signed release bundle** — the published ranking, its signed run, and the signed audit checkpoint in a single directory — with one offline verifier for the whole chain of custody (A8; commit `fc648da`, `manage.py release_bundle` + `python -m normalize.release`); and **login throttling** plus **per-user submission-write throttling** over a fail-open limiter (A9, A10) — which is why items 1 and 2 below are now scoped down to the routes that genuinely remain unenforced rather than struck out. What remains below is genuinely not in the build.
 
-1. **Rate-limit enforcement** — policy configured (`DOGFOOD_RATE_LIMITS`), no code consumes it. DESIGN ONLY.
-2. **Login throttling / lockout** — not implemented. DESIGN ONLY.
+1. **Rate-limit enforcement** — PARTIALLY SHIPPED. The `login` and `submission_write` policies are enforced (§A9, §A10) with a fail-open fixed-window limiter; `ballot_write` and `invite_redeem` have no HTTP route to enforce yet, so they stay DESIGN ONLY.
+2. **Account lockout** — login *throttling* is SHIPPED (§A9); a persistent per-account *lockout* after N failures is not built (a throttle resets each window by design, so a victim cannot be locked out by an attacker guessing at them). DESIGN ONLY.
 3. **Collusion & residual-outlier detection** in judging — structural leverage limits exist, active detectors do not. DESIGN ONLY.
 4. **Signed, single-use invitations** — no invite flow; the organizer seeds accounts. DESIGN ONLY.
 5. **Submission revisions / withdrawal** — create-only; no revision history. DESIGN ONLY.
@@ -227,8 +227,8 @@ Nothing here asks for trust. Bring up the stack and run the checks:
 
 ```bash
 docker compose up --build --detach --wait
-docker compose exec -T web python -m pytest tests/ -q          # smoke, normalizer, export guard
-docker compose exec -T -w /app/src web python manage.py test   # DB-backed isolation, gate, and audit-chain tests
+docker compose exec -T web python -m pytest tests/ -q          # smoke, normalizer, export guard, rate-limit fail-open/window
+docker compose exec -T -w /app/src web python manage.py test   # DB-backed isolation, gate, audit-chain, and login/submission throttle tests
 docker compose exec -T -w /app/src web python manage.py audit_verify   # recompute the live audit chain in place
 docker compose exec -T -w /app/src web python manage.py normalize_publish --export /tmp/nbundle   # sign a reproducible run, then self-verify
 docker compose exec -T -w /app/src web python -m normalize.verify /tmp/nbundle             # re-run the estimator from pinned inputs, offline
@@ -244,6 +244,7 @@ python3 tools/replay.py                                        # the 7 acceptanc
 | A3 server-side deadline | `replay.py` 3 |
 | A4 ownership (server-derived team, event-scoped track) | `submissions/services.py`, `submissions/views.py`; `replay.py` 3 |
 | A5 CSV formula-injection guard + cache headers | `tests/test_export_hardening.py`; `replay.py` 7 |
+| A9 login throttle + A10 submission-write throttle (per-IP / per-user, DEMO-exempt, fail-open, 429 + `Retry-After`) | `tests/test_ratelimit.py`; `src/accounts/tests.py`, `src/submissions/tests.py` (via `manage.py test`) |
 | A6 estimator determinism + signed reproducible run | `tests/test_normalize_engine.py`, `tests/test_normalize_signing.py`; `manage.py test`; `manage.py normalize_publish --export <dir>` + offline `python -m normalize.verify <dir>` |
 | A7/A8 tamper-evident audit chain + signed checkpoint | `src/audit/tests.py` (6, via `manage.py test audit`); `manage.py audit_verify`; `manage.py audit_export` + offline `audit/verify.py` |
 | A7 append-only ballot history | `src/judging/tests.py` (via `manage.py test judging`); `src/judging/models.py` `BallotRevision` |

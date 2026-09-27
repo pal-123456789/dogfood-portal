@@ -42,6 +42,9 @@ class DemoAuthMiddleware:
                 if user is not None:
                     request.user = user
                     request._dont_enforce_csrf_checks = True
+                    # Mark this as the DEMO/checker path. Write throttles skip it, so the five
+                    # checker routes stay byte-exact regardless of how many times the checker POSTs.
+                    request.demo_shim = True
         return self.get_response(request)
 
     @staticmethod
