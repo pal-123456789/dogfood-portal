@@ -9,9 +9,12 @@ the domain, not of one handler.
 import uuid
 
 from django.core.exceptions import PermissionDenied
+from django.db import transaction
 from django.utils import timezone
 
 from events.models import EventMembership, TeamMember
+
+from audit import service as audit_service
 
 from .models import Submission
 
@@ -50,9 +53,19 @@ def create_submission(actor, event, *, team, track, title, summary="", repo_url=
         raise ValueError("title is required")
     if team is None or track is None:
         raise ValueError("team and track are required")
-    return Submission.objects.create(
-        ext_id="sub_%s" % uuid.uuid4().hex[:16],
-        event=event, team=team, track=track,
-        title=title, summary=summary, repo_url=repo_url,
-        state=Submission.SUBMITTED, submitted_at=now,
-    )
+    # The create and its audit event share one transaction: a submission can never exist
+    # without its tamper-evident audit row. Note this is reached ONLY after the deadline gate
+    # above passes, so check 3's late POST is rejected before anything is written or audited.
+    with transaction.atomic():
+        sub = Submission.objects.create(
+            ext_id="sub_%s" % uuid.uuid4().hex[:16],
+            event=event, team=team, track=track,
+            title=title, summary=summary, repo_url=repo_url,
+            state=Submission.SUBMITTED, submitted_at=now,
+        )
+        audit_service.record_event(
+            event_type="submission.created", object_type="submission", object_id=sub.ext_id,
+            actor_user_id=actor.pk, occurred_at=now.isoformat(),
+            payload={"title": title, "track": track.ext_id, "team": team.ext_id,
+                     "event": event.ext_id, "state": sub.state})
+        return sub

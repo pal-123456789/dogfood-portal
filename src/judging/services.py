@@ -7,8 +7,11 @@ URL parameter. Checks 4/5/6 are the same endpoint differing only by caller ident
 ownership rule must be a property of the data layer.
 """
 from django.core.exceptions import ValidationError
+from django.db import transaction
 
 from events.models import EventMembership
+
+from audit import service as audit_service
 
 from .models import Ballot, JudgeAssignment
 
@@ -44,7 +47,9 @@ def record_ballot(membership, submission, *, functionality, quality, innovation,
     """Create/replace the caller's ballot for a submission; enforce the 1..5 bound.
 
     Not on the acceptance checker's path (its T2 is read-only), but it is the single writer
-    the DB CheckConstraint (a later migration) mirrors, so the rule is stated once here.
+    the DB CheckConstraint (a later migration) mirrors, so the rule is stated once here. The
+    write and its audit event share ONE transaction (audit/service.record_event), so a score
+    can never be persisted without its tamper-evident audit row, nor vice versa.
     """
     for name, val in (("functionality", functionality),
                       ("quality", quality), ("innovation", innovation)):
@@ -54,12 +59,20 @@ def record_ballot(membership, submission, *, functionality, quality, innovation,
             raise ValidationError("%s must be an integer 1..5" % name)
         if not (SCORE_MIN <= ival <= SCORE_MAX):
             raise ValidationError("%s must be %d..%d" % (name, SCORE_MIN, SCORE_MAX))
-    assignment, _ = JudgeAssignment.objects.get_or_create(
-        judge=membership, submission=submission)
-    ballot, _ = Ballot.objects.update_or_create(
-        assignment=assignment,
-        defaults=dict(functionality=int(functionality), quality=int(quality),
-                      innovation=int(innovation), comment=comment))
+    with transaction.atomic():
+        assignment, _ = JudgeAssignment.objects.get_or_create(
+            judge=membership, submission=submission)
+        ballot, _ = Ballot.objects.update_or_create(
+            assignment=assignment,
+            defaults=dict(functionality=int(functionality), quality=int(quality),
+                          innovation=int(innovation), comment=comment))
+        audit_service.record_event(
+            event_type="ballot.recorded", object_type="ballot",
+            object_id="%s:%s" % (membership.ext_id or membership.pk, submission.ext_id),
+            actor_user_id=membership.user_id, actor_membership_id=membership.ext_id,
+            payload={"submission": submission.ext_id, "judge": membership.ext_id,
+                     "functionality": int(functionality), "quality": int(quality),
+                     "innovation": int(innovation)})
     return ballot
 
 

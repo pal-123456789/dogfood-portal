@@ -4,5 +4,6 @@ psycopg[binary]>=3.1,<4   # NOT psycopg2: the binary wheel is what keeps gcc out
 gunicorn>=21,<24
 whitenoise>=6.6,<7
 numpy>=1.26,<3            # numpy.linalg only, for the 70x70 dense ridge solve. ~35 MB.
+cryptography>=42,<46      # Ed25519 audit checkpoints. manylinux wheel (Rust prebuilt) -> no gcc.
 pytest>=7.4,<9
 pytest-django>=4.7,<5
