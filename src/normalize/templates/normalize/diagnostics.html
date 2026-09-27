@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Review diagnostics · {{ event.name }}{% endblock %}
+{% block content %}
+<style>
+  table.lb{border-collapse:collapse;width:100%;margin:10px 0 26px;font-size:.9rem}
+  table.lb th,table.lb td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left}
+  table.lb th{color:var(--muted);font-weight:600;font-size:.76rem;text-transform:uppercase;letter-spacing:.03em}
+  table.lb td.num{text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .diag{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 6px}
+  .diag .tag b{color:var(--ink)}
+  .ci{color:var(--muted);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.85rem}
+  .flag{font-size:.72rem;color:#8a5a00;background:#fbf0d8;border-radius:6px;padding:1px 7px;white-space:nowrap}
+  .ok{font-size:.72rem;color:#2f6b2f;background:#e6f2e6;border-radius:6px;padding:1px 7px}
+  h2.sec{font-size:1.02rem;margin:28px 0 4px}
+  .scope{border:1px solid var(--line);border-left:3px solid var(--accent-ink);background:var(--card,#fafafa);border-radius:8px;padding:10px 14px;margin:12px 0}
+  .scope p{margin:4px 0;font-size:.86rem}
+</style>
+<div class="lede">
+  <h1>Review diagnostics</h1>
+  <p>Robustness, coverage and rubric-use checks an organizer reads before trusting the ranking. Organizer view.</p>
+</div>
+
+{% if data.n_ballots %}
+<div class="scope">
+  <p><b>This is review diagnostics, not fraud detection.</b> Flags are prompts for human review, never accusations, and nothing here downweights or excludes any ballot or judge.</p>
+  {% for note in data.notes %}<p class="ci">{{ note }}</p>{% endfor %}
+</div>
+
+<div class="diag">
+  <span class="tag">winner <b>{{ data.winner_title }}</b> <span class="ci">{{ data.winner }}</span></span>
+  <span class="tag">λ <b>{{ data.lambda }}</b></span>
+  <span class="tag">σ <b>{{ data.sigma }}</b></span>
+  <span class="tag">ballots <b>{{ data.n_ballots }}</b></span>
+  <span class="tag">components <b>{{ data.coverage.n_components }}</b></span>
+  <span class="tag">projects <b>{{ data.coverage.n_submissions }}</b></span>
+  <span class="tag">judges <b>{{ data.coverage.n_judges }}</b></span>
+</div>
+<p class="notice">Machine-readable: <a href="diagnostics.json">diagnostics.json</a>.</p>
+
+<h2 class="sec">Coverage &amp; comparison graph</h2>
+<p class="notice">Ballots per project {{ data.coverage.ballots_per_submission.min }}–{{ data.coverage.ballots_per_submission.max }} (median {{ data.coverage.ballots_per_submission.median }}); per judge {{ data.coverage.ballots_per_judge.min }}–{{ data.coverage.ballots_per_judge.max }} (median {{ data.coverage.ballots_per_judge.median }}). One connected component means every project is comparable; more than one means cross-group order is not identified by ratings alone.</p>
+{% if data.coverage.articulation_judges %}
+<p class="notice"><b>Articulation judges</b> (removing them isolates a project or splits a comparison group):</p>
+<ul>{% for a in data.coverage.articulation_judges %}<li class="ci">{{ a.judge }} → components {{ a.components_before }}→{{ a.components_after }}{% if a.isolated_submissions %}, isolates {% for s in a.isolated_submissions %}{{ s.submission }} {% endfor %}{% endif %}</li>{% endfor %}</ul>
+{% else %}
+<p class="notice"><span class="ok">healthy</span> No single judge disconnects the comparison graph.</p>
+{% endif %}
+{% if data.coverage.thin_submissions %}
+<p class="notice">Thinly covered (≤ {{ data.coverage.thin_threshold }} ballots): {% for s in data.coverage.thin_submissions %}<span class="ci">{{ s.submission }} ({{ s.n_ballots }})</span> {% endfor %}</p>
+{% endif %}
+
+<h2 class="sec">Surprising ballots — leave-one-out residuals |z| ≥ {{ data.residuals.z_threshold }}</h2>
+<p class="notice">Refit without each ballot, then predict it; a large standardized residual means the additive model explains that ballot poorly (a possible mis-entry or a genuine dissent — worth a look, not a verdict). Evaluated {{ data.residuals.evaluated }}; max |z| = {{ data.residuals.max_abs_z }}.</p>
+{% if data.residuals.flagged %}
+<table class="lb"><thead><tr><th>Judge</th><th>Project</th><th>Score</th><th>Predicted</th><th>z</th></tr></thead><tbody>
+{% for r in data.residuals.flagged %}<tr><td class="ci">{{ r.judge }}</td><td>{{ r.title }} <span class="ci">{{ r.submission }}</span></td><td class="num">{{ r.score }}</td><td class="num">{{ r.predicted }}</td><td class="num">{{ r.z }}</td></tr>{% endfor %}
+</tbody></table>
+{% else %}<p class="notice"><span class="ok">none</span> No ballot exceeds the pre-registered residual threshold.</p>{% endif %}
+
+<h2 class="sec">Decision influence</h2>
+<p class="notice">Does dropping one ballot or one judge move the outcome? Ballots: winner changes {{ data.ballot_influence.winner_changes }}, top-3 changes {{ data.ballot_influence.top3_changes }}, max rank shift {{ data.ballot_influence.max_rank_shift }}, max Δq {{ data.ballot_influence.max_score_shift }} across {{ data.ballot_influence.evaluated }} single-ballot removals. A single judge is a bloc, so the table below (leave-one-judge-out) is the one that matters:</p>
+<table class="lb"><thead><tr><th>Judge</th><th>Ballots</th><th>Max rank shift</th><th>Max Δq</th><th>Winner?</th><th>Top-3?</th><th></th></tr></thead><tbody>
+{% for r in data.judge_influence.judges %}<tr>
+  <td class="ci">{{ r.judge }}</td><td class="num">{{ r.n_ballots }}</td>
+  {% if r.removed_everything %}<td colspan="5" class="ci">only judge — nothing left to rank</td>
+  {% else %}<td class="num">{{ r.max_rank_shift }}</td><td class="num">{{ r.max_score_shift }}</td>
+  <td>{% if r.winner_changed %}yes{% else %}no{% endif %}</td><td>{% if r.top3_changed %}yes{% else %}no{% endif %}</td>
+  <td>{% if r.flagged %}<span class="flag">influential</span>{% endif %}</td>{% endif %}
+</tr>{% endfor %}
+</tbody></table>
+
+{% if data.low_discrimination %}
+<h2 class="sec">Low-discrimination judges</h2>
+<p class="notice">Gave identical scores across ≥ {{ data.thresholds.lowdisc_min_ballots }} ballots, so they add no separation to the ranking. Their severity offset still fits; nothing is excluded or downweighted.</p>
+<ul>{% for j in data.low_discrimination %}<li class="ci">{{ j.judge }} — {{ j.n_ballots }} ballots, all {{ j.composite_value }}{% if j.distinct_vectors %}, {{ j.distinct_vectors }} distinct vector(s){% endif %}</li>{% endfor %}</ul>
+{% endif %}
+
+{% if data.rubric_use %}
+<h2 class="sec">Rubric use (descriptive)</h2>
+<p class="notice">{% for c, v in data.rubric_use.by_criterion.items %}<b>{{ c }}</b> {{ v.mean }}±{{ v.std }}&nbsp;&nbsp;{% endfor %}</p>
+<p class="notice">Scale use 1→5: {% for k, v in data.rubric_use.scale_use.items %}{{ k }}:{{ v }} {% endfor %}</p>
+{% endif %}
+
+{% else %}
+<p class="notice">No ballots recorded yet — the diagnostics panel appears once judging begins.</p>
+{% endif %}
+{% endblock %}

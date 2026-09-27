@@ -20,7 +20,7 @@ from events.models import Event, EventMembership, Team, Track
 from judging.models import Ballot, JudgeAssignment, RubricWeight
 from submissions.models import Submission
 
-from normalize import engine, results, runs, services, signing, verify
+from normalize import diagnostics, engine, results, runs, services, signing, verify
 from normalize.models import NormalizationRun, ResultPublication
 
 User = get_user_model()
@@ -378,4 +378,182 @@ class ResultPublicationTests(TestCase):
         self.assertEqual(current_head().seq, head0)                    # both audit events rolled back
         self.assertFalse(Event.objects.get(pk=self.event.pk).results_published)
 
+
+class DiagnosticsEngineTests(SimpleTestCase):
+    """Pure (no DB) tests of normalize.diagnostics.report on hand-built panels. Each targets ONE
+    diagnostic with a case whose answer is unambiguous - a surprising ballot that must top the
+    residual flags, a single judge whose removal flips the winner, a bridge judge whose removal
+    splits the comparison graph, a constant-scoring judge - plus the honest-scope keys, the empty
+    panel, no-false-positive on clean data, and determinism. Thresholds are asserted to be the
+    pre-registered module constants, never re-derived from the data."""
+
+    def test_scope_and_prereg_thresholds(self):
+        rep = diagnostics.report([4.0, 3.0, 4.0, 3.0], ["j0", "j0", "j1", "j1"],
+                                 ["s0", "s1", "s0", "s1"], lam=1.0)
+        self.assertEqual(rep["scope"], "review diagnostics, not fraud detection")
+        self.assertEqual(rep["thresholds"]["residual_z"], diagnostics.RESIDUAL_Z)
+        self.assertEqual(rep["thresholds"]["influence_rank_shift"], diagnostics.INFLUENCE_RANK_SHIFT)
+        self.assertEqual(rep["thresholds"]["lowdisc_min_ballots"], diagnostics.LOWDISC_MIN_BALLOTS)
+        for key in ("residuals", "ballot_influence", "judge_influence", "coverage"):
+            self.assertIn(key, rep)
+
+    def test_empty_panel(self):
+        self.assertEqual(diagnostics.report([], [], [])["n_ballots"], 0)
+
+    def test_surprising_ballot_tops_residual_flags(self):
+        # 6 subs x 5 judges, exactly additive; one ballot pushed +12 must be the top-|z| flag.
+        subs, judges = ["s%d" % i for i in range(6)], ["j%d" % i for i in range(5)]
+        q = {s: 6.0 - i for i, s in enumerate(subs)}
+        b = {j: (i - 2) * 0.3 for i, j in enumerate(judges)}   # -0.6..0.6, mean 0
+        y, jk, sk = [], [], []
+        for s in subs:
+            for j in judges:
+                y.append(q[s] + b[j]); jk.append(j); sk.append(s)
+        y[0] += 12.0                                            # (s0, j0) outlier
+        res = diagnostics.report(y, jk, sk, lam=0.01)["residuals"]
+        self.assertGreaterEqual(res["max_abs_z"], diagnostics.RESIDUAL_Z)
+        self.assertEqual((res["flagged"][0]["submission"], res["flagged"][0]["judge"]), ("s0", "j0"))
+
+    def test_clean_additive_panel_flags_nothing(self):
+        subs, judges = ["s0", "s1", "s2"], ["j0", "j1", "j2"]
+        q, b = {"s0": 4.0, "s1": 3.0, "s2": 2.0}, {"j0": 0.0, "j1": 1.0, "j2": -1.0}
+        y, jk, sk = [], [], []
+        for s in subs:
+            for j in judges:
+                y.append(q[s] + b[j]); jk.append(j); sk.append(s)
+        res = diagnostics.report(y, jk, sk, lam=0.01)["residuals"]
+        self.assertEqual(res["flagged"], [])
+        self.assertLess(res["max_abs_z"], diagnostics.RESIDUAL_Z)
+
+    def test_leave_one_judge_out_can_flip_winner(self):
+        # Two close projects; two judges mildly favour beta, one judge strongly favours alpha.
+        # With everyone alpha leads (its within-judge margin dominates); drop jx and beta wins.
+        jk, sk, y = [], [], []
+
+        def add(j, s, v):
+            jk.append(j); sk.append(s); y.append(v)
+        for j in ("j0", "j1"):
+            add(j, "alpha", 2.0); add(j, "beta", 3.0)          # mild: beta > alpha by 1
+        add("jx", "alpha", 5.0); add("jx", "beta", 1.0)        # strong: alpha > beta by 4
+        rep = diagnostics.report(y, jk, sk, lam=1.0)
+        self.assertEqual(rep["winner"], "alpha")
+        ji = rep["judge_influence"]
+        self.assertGreaterEqual(ji["winner_changes"], 1)
+        jx = [r for r in ji["judges"] if r["judge"] == "jx"][0]
+        self.assertTrue(jx["winner_changed"] and jx["flagged"])
+
+    def test_articulation_judge_detected(self):
+        # Two clusters joined ONLY through jx; dropping jx splits the graph 1 -> 2 components.
+        jk, sk, y = [], [], []
+
+        def add(j, s, v):
+            jk.append(j); sk.append(s); y.append(v)
+        for j in ("ja0", "ja1"):
+            add(j, "a0", 4.0); add(j, "a1", 3.0)
+        for j in ("jb0", "jb1"):
+            add(j, "b0", 4.0); add(j, "b1", 3.0)
+        add("jx", "a0", 4.0); add("jx", "b0", 4.0)             # the only bridge
+        cov = diagnostics.report(y, jk, sk, lam=1.0)["coverage"]
+        self.assertEqual(cov["n_components"], 1)
+        self.assertEqual([a["judge"] for a in cov["articulation_judges"]], ["jx"])
+
+    def test_low_discrimination_flagged_with_vectors(self):
+        # jflat gives one identical vector to 4 projects (no separation); jvar varies.
+        subs = ["s0", "s1", "s2", "s3"]
+        jk, sk, y, vectors = [], [], [], []
+
+        def add(j, s, f, q, i):
+            jk.append(j); sk.append(s); y.append((f + q + i) / 3.0); vectors.append((f, q, i))
+        for s in subs:
+            add("jflat", s, 3, 3, 3)                           # constant -> zero separation
+        for f, s in zip((5, 4, 3, 2), subs):
+            add("jvar", s, f, f, f)                            # varies
+        rep = diagnostics.report(y, jk, sk, vectors=vectors, lam=1.0)
+        low = rep["low_discrimination"]
+        self.assertEqual([j["judge"] for j in low], ["jflat"])
+        self.assertEqual((low[0]["n_ballots"], low[0]["distinct_vectors"]), (4, 1))
+        self.assertIsNotNone(rep["rubric_use"])
+
+    def test_report_deterministic(self):
+        import json
+        subs, judges = ["s0", "s1", "s2", "s3", "s4"], ["j0", "j1", "j2"]
+        y, jk, sk = [], [], []
+        for i, s in enumerate(subs):
+            for k, j in enumerate(judges):
+                y.append(5 - i + 0.1 * k); jk.append(j); sk.append(s)
+        a = json.dumps(diagnostics.report(y, jk, sk, lam=1.0), sort_keys=True)
+        b = json.dumps(diagnostics.report(y, jk, sk, lam=1.0), sort_keys=True)
+        self.assertEqual(a, b)
+
+
+class ReviewDiagnosticsViewTests(TestCase):
+    """DB-backed tests for the organizer-only review-diagnostics routes (P4). Reuses the
+    perfectly-additive 3-judge x 3-submission fixture (prj_a first) so coverage is a single
+    connected component with no articulation judge, then asserts the same 401/403/200 gate shape
+    as the leaderboard on BOTH /normalize/diagnostics and diagnostics.json (routes that are NOT the
+    checker's five), and that the organizer JSON carries the honest scope, the pre-registered
+    thresholds, every panel section, and the expected clean-panel coverage."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.event = Event.objects.create(
+            ext_id="evt_d", name="Diag Event", state=Event.CLOSED,
+            submissions_close=timezone.now() - timezone.timedelta(days=1))
+        track = Track.objects.create(ext_id="trk_d", event=cls.event, name="D")
+        team = Team.objects.create(ext_id="tm_d", event=cls.event, name="Team")
+        for c in engine.CRITERIA:
+            RubricWeight.objects.create(event=cls.event, criterion=c, weight=1.0)
+        subs = {}
+        for sid in ("prj_a", "prj_b", "prj_c"):
+            subs[sid] = Submission.objects.create(
+                ext_id=sid, event=cls.event, team=team, track=track,
+                title="Title %s" % sid, state=Submission.SUBMITTED)
+        base = {"prj_a": 4, "prj_b": 3, "prj_c": 2}
+        bias = [0, 1, -1]
+        for n in range(3):
+            u = User.objects.create_user(email="djudge%d@t.demo" % n, display_name="DJ%d" % n)
+            m = EventMembership.objects.create(
+                user=u, event=cls.event, role=EventMembership.JUDGE, ext_id="jdg_d%d" % n)
+            for sid, sub in subs.items():
+                a = JudgeAssignment.objects.create(judge=m, submission=sub)
+                v = base[sid] + bias[n]
+                Ballot.objects.create(assignment=a, functionality=v, quality=v, innovation=v)
+        cls.org = User.objects.create_user(email="dorg@t.demo", display_name="DOrg")
+        EventMembership.objects.create(user=cls.org, event=cls.event,
+                                       role=EventMembership.ORGANIZER)
+        cls.participant = User.objects.create_user(email="dpart@t.demo", display_name="DPart")
+        EventMembership.objects.create(user=cls.participant, event=cls.event,
+                                       role=EventMembership.PARTICIPANT)
+
+    def test_gate_anonymous_401(self):
+        c = Client()
+        self.assertEqual(c.get("/normalize/diagnostics").status_code, 401)
+        self.assertEqual(c.get("/normalize/diagnostics.json").status_code, 401)
+
+    def test_gate_participant_403(self):
+        c = Client()
+        c.force_login(self.participant)
+        self.assertEqual(c.get("/normalize/diagnostics").status_code, 403)
+        self.assertEqual(c.get("/normalize/diagnostics.json").status_code, 403)
+
+    def test_gate_organizer_200_html(self):
+        c = Client()
+        c.force_login(self.org)
+        html = c.get("/normalize/diagnostics")
+        self.assertEqual(html.status_code, 200)
+        self.assertTemplateUsed(html, "normalize/diagnostics.html")
+
+    def test_organizer_json_shape_and_clean_coverage(self):
+        c = Client()
+        c.force_login(self.org)
+        data = c.get("/normalize/diagnostics.json").json()
+        self.assertEqual(data["scope"], "review diagnostics, not fraud detection")
+        for key in ("thresholds", "residuals", "ballot_influence", "judge_influence",
+                    "coverage", "low_discrimination", "rubric_use"):
+            self.assertIn(key, data)
+        self.assertEqual(data["n_ballots"], 9)
+        self.assertEqual(data["winner"], "prj_a")
+        self.assertEqual(data["coverage"]["n_components"], 1)
+        self.assertEqual(data["coverage"]["articulation_judges"], [])
+        self.assertEqual(data["ballot_influence"]["winner_changes"], 0)   # no single ballot flips it
 

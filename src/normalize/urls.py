@@ -11,4 +11,6 @@ urlpatterns = [
     path("results", views.results, name="results"),
     path("results.json", views.results_json, name="results_json"),
     path("results/publish", views.results_publish, name="results_publish"),
+    path("diagnostics", views.diagnostics, name="diagnostics"),
+    path("diagnostics.json", views.diagnostics_json, name="diagnostics_json"),
 ]

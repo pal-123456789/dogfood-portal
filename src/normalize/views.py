@@ -4,7 +4,8 @@
 Two audiences, one clean split (docs/THREAT-MODEL.md W1):
   * Organizer-only (gated 401/403 like the CSV export): `leaderboard` / `leaderboard_json` show the
     live, recomputed normalized ranking -- results-in-waiting -- and `results_publish` is the publish
-    console. Severity-adjustment can reshuffle the podium, so these are never public.
+    console. `diagnostics` / `diagnostics_json` are the review panel (residuals, decision influence,
+    coverage -- NOT fraud detection). Severity-adjustment can reshuffle the podium, so none is public.
   * Public: `results` / `results_json` serve ONLY what an organizer has explicitly published, and
     they serve the signed run's FROZEN `result` verbatim (never a recompute), so what the world sees
     canonicalizes to the signed `result_hash` and verifies offline. Before the first publish they say
@@ -103,3 +104,21 @@ def results_publish(request):
                   {"event": event, "current": results_svc.current_publication(event),
                    "data": results_svc.current_results(event),
                    "history": results_svc.publication_history(event)})
+
+
+def diagnostics(request):
+    """Organizer-only review-diagnostics panel (robustness + coverage, NOT fraud detection)."""
+    event, err = _gate(request)
+    if err:
+        msg, status = err
+        return HttpResponse(msg, status=status, content_type="text/plain")
+    return render(request, "normalize/diagnostics.html",
+                  {"event": event, "data": services.diagnostics_report(event)})
+
+
+def diagnostics_json(request):
+    event, err = _gate(request)
+    if err:
+        msg, status = err
+        return JsonResponse({"detail": msg}, status=status)
+    return JsonResponse(services.diagnostics_report(event))

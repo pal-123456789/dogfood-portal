@@ -13,7 +13,7 @@ from events.models import Event
 from judging.models import Ballot, RubricWeight
 from submissions.models import Submission
 
-from . import engine
+from . import diagnostics, engine
 
 
 def current_event():
@@ -31,22 +31,32 @@ def rubric_weights(event):
     return {c: rows.get(c, 1.0) for c in engine.CRITERIA}
 
 
-def observed(event):
-    """(y, judge_keys, sub_keys): y is the weighted 0..5 composite of each ballot.
+def observed_full(event):
+    """(y, judge_keys, sub_keys, vectors): the weighted 0..5 composite of each ballot PLUS its raw
+    (functionality, quality, innovation) triple in engine.CRITERIA order.
 
-    judge key = membership ext_id (jdg_01...), submission key = its ext_id (prj_01...); string
-    keys keep the engine's matrix columns legible and its output deterministic.
+    judge key = membership ext_id (jdg_01...), submission key = its ext_id (prj_01...); string keys
+    keep the engine's matrix columns legible and its output deterministic. `vectors` powers the
+    diagnostics' distinct-vector + scale-use stats. observed() delegates here so the composite
+    inputs (y, jk, sk) it feeds the leaderboard stay byte-identical - one query, one ordering.
     """
     weights = rubric_weights(event)
     qs = (Ballot.objects
           .filter(assignment__submission__event=event)
           .select_related("assignment__judge", "assignment__submission"))
-    y, jk, sk = [], [], []
+    y, jk, sk, vectors = [], [], [], []
     for b in qs:
         raw = {"functionality": b.functionality, "quality": b.quality, "innovation": b.innovation}
         y.append(engine.composite(raw, weights))
         jk.append(b.assignment.judge.ext_id)
         sk.append(b.assignment.submission.ext_id)
+        vectors.append(tuple(raw[c] for c in engine.CRITERIA))
+    return y, jk, sk, vectors
+
+
+def observed(event):
+    """(y, judge_keys, sub_keys): the weighted 0..5 composite of each ballot (see observed_full)."""
+    y, jk, sk, _vectors = observed_full(event)
     return y, jk, sk
 
 
@@ -125,3 +135,18 @@ def proof_report(event, n_boot=1000, seed=0):
         "unresolved_count": len(rep["unresolved"]),
         "duplicate": dup,
     }
+
+
+def diagnostics_report(event, lam=None, seed=0):
+    """Organizer review-diagnostics panel for the event (see normalize.diagnostics -- NOT fraud
+    detection): leave-one-ballot-out residuals, single-ballot + single-judge decision influence,
+    graph coverage / articulation judges, and low-discrimination + scale-use stats.
+
+    READ-ONLY and off the acceptance checker's five routes, so it cannot move replay. Self-selects
+    lambda by CV on observed ballots (the live default) unless a run's lambda is pinned. Returns
+    n_ballots=0 when nothing is recorded yet so the page degrades instead of raising.
+    """
+    y, jk, sk, vectors = observed_full(event)
+    if not y:
+        return {"n_ballots": 0, "scope": "review diagnostics, not fraud detection"}
+    return diagnostics.report(y, jk, sk, _display(event), vectors=vectors, lam=lam, seed=seed)
