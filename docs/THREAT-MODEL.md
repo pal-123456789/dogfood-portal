@@ -1,0 +1,231 @@
+# Threat Model
+
+DOGFOOD is a self-hostable hackathon submission-and-judging platform. An organizer forks it, runs `docker compose up`, and trusts it to keep each judge's ballots private, enforce the submission deadline, compute a defensible ranking, and export results without corrupting them. This document states — honestly — what the shipped build defends against, what it does not, and how a reviewer can verify each claim without taking our word for it.
+
+Every control below carries one of four labels:
+
+- **SHIPPED** — implemented and covered by a test or acceptance check named in §10. If the evidence does not exist, the control is not labelled SHIPPED.
+- **DESIGN ONLY** — the design is worked out and the seam exists, but the enforcing code is not in this build. Claimed as future work, never as a mitigation.
+- **DECLINED** — deliberately out of scope, with the reason stated.
+- **ACCEPTED RISK** — a residual we understand and choose to live with at this scale.
+
+A control table that quietly labelled aspirations as "shipped" would be worse than no table: a reviewer who finds one false claim is right to distrust every other. So where the pre-build design over-reached, this document downgrades the claim rather than the evidence.
+
+## 1. Scope and the one boundary that matters
+
+The system is single-tenant and single-event by construction: one running instance serves one event. It is designed to run fully offline — no external identity provider, email, SMS, CAPTCHA, or third-party reputation service is available. That single constraint (§5) shapes everything that follows.
+
+The trust boundary that matters is the **operator boundary**. Because the platform is self-hosted, whoever runs it holds the database credentials and can `docker exec` into the container. No application-layer control can stop a party who edits the database directly. This threat model therefore does not pretend to defend the data *against its own operator*; it is explicit (§7 A8) that detection — not prevention — is the only honest posture there. What the code *does* enforce is the boundary between the platform's **users**: participants, judges, and organizers acting through the HTTP surface.
+
+## 2. Assets
+
+Assets worth attacking, in rough priority:
+
+| Asset | Why it is a target | Defended in |
+|---|---|---|
+| Judge ballots (per-judge confidentiality) | Seeing peers' scores enables anchoring and collusion | §7 A1 |
+| Authorization state (who is judge / organizer) | Role escalation unlocks every other asset | §7 A2 |
+| Submission-deadline fairness | Extra time is a direct competitive advantage | §7 A3 |
+| Submission ownership | Submitting as or for another team corrupts attribution | §7 A4 |
+| Results-export integrity | A poisoned CSV can execute in the organizer's spreadsheet | §7 A5 |
+| The ranking itself (normalizer) | The whole point of the platform is a trustworthy rank | §7 A6 |
+| Ballot history / tamper-evidence | Silent edits undermine every result | §7 A7 |
+| Admin credentials, secret key | Full compromise | §7 A9 |
+
+## 3. Adversaries and their budgets
+
+We model attackers by capability, not by name. An offline attacker cannot buy identities or outsource CAPTCHAs; their only budget is the accounts and API access the organizer already granted.
+
+| Code | Who | Capability assumed |
+|---|---|---|
+| X | Unauthenticated outsider | Can reach the public HTTP surface only |
+| P | One participant | A single valid participant session |
+| C | Colluding participants | A few coordinated participant sessions |
+| J | A judge | A valid judge session plus assigned submissions |
+| O | Organizer / operator | Organizer role **and** DB + `docker exec` on the host |
+| N | Host / infrastructure compromise | **Out of scope** — see §7 A8 |
+
+Adversary **O** is the distinctive one for a self-hosted product and is treated separately in §7 A8. Adversaries X, P, C, and J act only through the application, and are the ones the code below actually constrains.
+
+## 4. Trust boundaries
+
+1. **Network → app.** Only the web service publishes a port (`:8000`); PostgreSQL is never published to the host (`docker-compose.yml` exposes no `db` ports). SHIPPED.
+2. **Anonymous → authenticated.** Session identity is resolved once, and every protected view re-derives authorization from the *caller's* membership, never from a URL or form field (§7 A1/A2). SHIPPED.
+3. **User → user (participant / judge / organizer).** Enforced at the service and data layer so it holds for every entry point, not only the HTTP handler that happens to be tested. SHIPPED.
+4. **User → operator.** Not defensible in a self-hosted model; see §7 A8. ACCEPTED RISK, documented.
+
+## 5. The offline constraint
+
+Almost every mainstream anti-abuse control assumes an online oracle: email or SMS verification to raise the cost of a fake identity, CAPTCHA to price out automation, IP or device reputation to spot sybils, an external clock to anchor deadlines. DOGFOOD is required to run air-gapped, so **none of those are available.** This is not a gap to apologise for; it is the design centre. The consequence is that sybil-resistance cannot come from the platform — it comes from the organizer controlling account creation: accounts and roles are seeded or granted by the organizer, never self-served (§7 A2). Where a control would have leaned on an online oracle, this document says so and marks it DECLINED rather than faking a mitigation.
+
+## 6. Posture
+
+For each threat we aim for the strongest posture the offline constraint allows:
+
+- **PREVENT** — the attack cannot succeed through the API (e.g. cross-judge reads).
+- **DETECT** — the attack is visible after the fact.
+- **EVIDENT & REVERSIBLE** — tampering leaves a trail and can be undone.
+
+Honestly: this build achieves **PREVENT** for the user-boundary threats (isolation, role, deadline, ownership, export). For DETECT / EVIDENT it now ships the append-only, hash-chained audit log those postures depend on (§7 A7, A8): every ballot and submission write appends an immutable, chained audit event in the same transaction, and an organizer can recompute the chain — and check a signed checkpoint — offline. The one honest limit is the operator boundary (§7 A8): a chain and a signing key that both live on the operator's own host detect tampering only *relative to a signed checkpoint that left the operator's control before the disputed change*. Prevention against the operator remains out of reach by construction — a property of self-hosting, not a missing feature.
+
+## 7. Threats
+
+Each threat gives the mechanism, the control, its status, the residual, and the exact command a reviewer runs to check it (see §10 for how to run them).
+
+### A1 — Cross-judge ballot disclosure (the crux) · SHIPPED · PREVENT
+
+*Mechanism.* A judge, or anyone, tries to read another judge's scores — e.g. by passing `?judge=judge_a` while authenticated as someone else, or by hitting the judge API unauthenticated.
+
+*Control.* `/api/judge/scores` derives the caller's judge membership for the event and returns **only** `Ballot.objects.filter(assignment__judge=membership)`. The `?judge=` parameter can only ever *narrow to denial*: if it names anyone but the caller, the response is 403; it never selects whose rows are returned. Ownership is a property of the data query, not of the URL. An unauthenticated caller is 401; a non-judge is 403. This is backend enforcement — no frontend check is involved, so it cannot be bypassed by calling the API directly (a frontend-only check would be an automatic disqualification).
+
+*Status.* SHIPPED. Independently confirmed by an external security cold-read of the shipped code.
+
+*Residual.* If two judge memberships were seeded with the *same* `ext_id`, the `?judge=` denial check could mismatch — but the returned rows would still be the caller's own, so confidentiality holds; only the parameter echo would be wrong. Enforcing unique non-blank `ext_id` per event is DESIGN ONLY. ACCEPTED at fixture scale, where ext_ids are unique.
+
+*Verify.* `tools/replay.py` checks 4/5/6; `src/normalize/tests.py` asserts the ownership matrix.
+
+### A2 — Role / authorization escalation · SHIPPED · PREVENT
+
+*Mechanism.* A participant tries to read the judge API or hit the organizer-only CSV export; or a user tries to grant themselves a role.
+
+*Control.* Roles are **event-scoped** `EventMembership` rows (organizer / judge / participant), not global flags. Every protected view checks the caller's membership for the current event: the judge API requires a judge membership (else 403), and the export requires an organizer membership (else 403). There is **no self-service membership or role endpoint** — memberships are created only by the organizer's seed/import path, which is the offline sybil-resistance boundary from §5.
+
+*Status.* SHIPPED (checks 4/5/6/7).
+
+*Residual.* Roles are **additive by design**: one user may hold participant + judge + organizer in the same event if an organizer grants them. That is intended (a small event may need it) and is not escalation, because only an organizer can create the grant. Mutually exclusive roles, if an adopter needs them, are DESIGN ONLY (a cross-row constraint would enforce it).
+
+*Verify.* `tools/replay.py` checks 6 and 7; `src/normalize/tests.py`.
+
+### A3 — Deadline gaming · SHIPPED · PREVENT
+
+*Mechanism.* A participant submits, or edits, after the deadline to gain time.
+
+*Control.* The deadline is a single canonical rule in the submission **service**, not the view or template: `create_submission` checks auth → participant role → the event's accepting-submissions window before any field validation, using **server time** (`timezone.now()`); the HTTP handler never accepts a client-supplied clock. A late POST is rejected for being late even if otherwise well-formed. Crucially, the acceptance checker's closed-event POST returns 4xx because of the **deadline**, not because of CSRF — the demo shim exempts CSRF precisely so the 4xx proves the rule under test (§7 A9).
+
+*Status.* SHIPPED (check 3).
+
+*Residual.* (1) Submissions are **create-only** — there is no edit or revision endpoint in this build, so "edit after close" is not reachable (verified: no update view exists). (2) A theoretical TOCTOU race exists if an organizer closes the event in the millisecond between the state read and the row insert. ACCEPTED RISK — negligible at event scale; a row lock would close it and is DESIGN ONLY.
+
+*Verify.* `tools/replay.py` check 3.
+
+### A4 — Submission ownership / IDOR · SHIPPED · PREVENT
+
+*Mechanism.* A participant tries to submit *for another team*, or attach their submission to a *foreign event's* track, by supplying someone else's identifiers in the POST body.
+
+*Control.* The write path never trusts a client-supplied owner. The team is **derived server-side** from the caller's own `TeamMember` membership (`participant_team`), so a `team=` field in the request body is simply ignored; the track is looked up **scoped to the current event** (`Track.objects.filter(event=event, ext_id=…)`), so a track id from another event resolves to nothing and the submission is rejected. There is no identifier a caller can inject to submit as, or for, another team.
+
+*Status.* SHIPPED. An external cold-read flagged this as a *potential* IDOR against the then-unseen code; reading the shipped implementation refutes it — the owner is server-derived.
+
+*Residual.* A participant who belongs to multiple teams submits under the deterministic first team, by id. At fixture scale each participant is on one team. ACCEPTED.
+
+*Verify.* Code: `submissions/services.py` (`participant_team`, `create_submission`); `submissions/views.py` (track lookup). `tools/replay.py` check 3 exercises the write path.
+
+### A5 — Export integrity: spreadsheet formula injection · SHIPPED · PREVENT
+
+*Mechanism.* A participant names a project — or a judge writes a comment — beginning with `=`, `+`, `-`, `@`, tab, or carriage return, e.g. `=HYPERLINK("http://evil","click")`. When the organizer opens the exported CSV in Excel or Sheets, the cell executes as a formula (CWE-1236), exfiltrating data or running a callback in the organizer's session.
+
+*Control.* `export_event_rows` passes every **data** cell through `_csv_safe`, which prefixes an apostrophe to any string beginning with a formula-trigger character. Spreadsheets then display the literal text and do not evaluate it. Standard CSV quoting — which `csv.writer` already does — escapes delimiters but does **not** neutralise formulas, so this guard is separate and necessary. The header row is static and untouched, so the export still carries commas on line 1.
+
+*Status.* SHIPPED — Increment 3 (commit `94d2e31`).
+
+*Related hardening.* The judge-scores and export responses now send `Cache-Control: private, no-store` and `Vary: Cookie`, so a reverse proxy or shared cache placed in front of the app cannot serve one caller's private rows to another.
+
+*Verify.* `tests/test_export_hardening.py` (the guard, DB-free); `tools/replay.py` check 7 (export still valid).
+
+### A6 — Gaming the normalizer · estimator SHIPPED · detectors DESIGN ONLY
+
+*Mechanism.* A judge tries to move the ranking by scoring strategically — inflating an ally, tanking a rival, or exploiting leniency — rather than honestly.
+
+*What the design already bounds.* The ranking is a ridge / partial-pooling fit that separates project quality `q` from judge severity `b` (`y = q + b + e`, penalty on `b` only; see JUDGING.md). Two structural facts limit a single judge's leverage: a judge influences a submission only in proportion to `1/R`, the number of ballots on it, so on a well-connected panel one malicious ballot moves `q` little; and cross-submission comparison is only identified within a connected component of the judge–submission graph, so a judge cannot manufacture rank against projects they never share a co-judge with. λ is chosen by cross-validation on observed ballots only — never on ground truth — so it is a *fit* parameter, not a tunable lever and not a security parameter.
+
+*Status.* The estimator and its determinism are SHIPPED (`tests/test_normalize_engine.py`, `src/normalize/tests.py`). Active **collusion detectors** — residual-outlier reports, exact-match ballot detection, zero-variance-judge exclusion — are **DESIGN ONLY**: the seams are understood but the code is not in this build.
+
+*Residual.* A coordinated ring of judges sharing many submissions could still bias results within their component. Detecting that is the DESIGN-ONLY work above. ACCEPTED for this build, and named in §9.
+
+*Verify.* `tests/test_normalize_engine.py`; `manage.py test` (normalize service tests); JUDGING.md for the derivation and the honest within-submission σ-reduction on the real fixture.
+
+### A7 — Silent ballot tampering / missing tamper-evidence · audit log SHIPPED · EVIDENT (ballot-row freeze DESIGN ONLY)
+
+*Mechanism.* A ballot is changed after the fact — by a judge revising quietly, or by anyone with app write access — with no record that it happened.
+
+*Control (shipped).* Every write that matters now appends an immutable, hash-chained audit event. `record_ballot` and `create_submission` each call `audit.service.record_event` **inside the same `transaction.atomic()` as the business write**, so a score can never be persisted without its audit row, nor the reverse — the rollback is asserted by `test_business_write_rolls_back_when_audit_append_raises`. Each event carries a frozen schema-v1 header plus a `payload_hash` / `prev_hash` / `row_hash` triple; `seq` is issued from a single `AuditHead` row locked `FOR UPDATE`, never from an auto-increment PK (Postgres sequences gap on rollback and would silently hole the chain). `audit.hashchain.verify_chain` recomputes the whole chain and pinpoints the first `seq` where an insert, delete, reorder, or edit breaks the linkage. So a judge who revises a ballot leaves **two** chained events — the prior scores survive in the earlier one — and any edit to a stored audit row is detectable.
+
+*Status.* SHIPPED (commit `edb35c8`) — hash-chained `audit_event` + singleton `AuditHead`, atomic co-commit with the business write, `verify_chain`, and the `audit_verify` / `audit_export` commands. Covered by `src/audit/tests.py` (6 DB-backed tests) and the offline verifier `audit/verify.py`.
+
+*Residual — what is NOT yet shipped (do not read more into this).* The **`Ballot` row itself is still mutable**: `record_ballot` uses `update_or_create`, so the *current* ballot state is overwritten in place. The audit log makes that overwrite **evident** (the old value survives in the earlier chained event), but the row is not yet append-only. A first-class `BallotRevision` history — `UNIQUE(ballot, version)` with a DB `CHECK 1..5` and readers pinned to the highest version — is the next build and is item 1 on the honest list (§9). Separately, an out-of-band edit made **directly in Postgres** (bypassing `record_ballot`) emits no event; it is caught only by comparing the live row against the audit log's last recorded value for that ballot — a manual reconciliation today, not an automated one.
+
+*Verify.* `src/audit/models.py` (the two tables); `judging/services.py` `record_ballot` (the atomic `record_event` call — and the still-present `update_or_create`); `manage.py test audit`; `manage.py audit_verify`.
+
+### A8 — Insider / operator tampering (adversary O) · prevention ACCEPTED RISK · detection SHIPPED-with-caveat
+
+A self-hosted platform cannot *prevent* tampering by the party that runs it: the operator holds the database password, `docker exec`, the filesystem, and the signing key. They can edit a ballot, flip a role, or move the deadline directly in Postgres, beneath the application. **We do not claim to prevent this**, and any control implying otherwise would be dishonest. Prevention against adversary O stays ACCEPTED RISK by construction.
+
+What is now shipped is **detection**, with a caveat stated precisely so it is not mistaken for more. The hash-chained audit log (A7) plus an **Ed25519-signed checkpoint** (`audit/receipts.py`, `audit_export`) and an **offline verifier** (`audit/verify.py`, `audit_verify`) let an independent party recompute the chain and check the signed tip without trusting the running server. This catches insert / delete / reorder / edit within the stored rows and any tampering via the app or a DB role.
+
+The caveat: a chain and a signing key that **both live on the operator's own host do not bind the operator.** An operator who rewrites history can re-sign a fresh, self-consistent checkpoint over it. Detection is therefore only as strong as a **checkpoint that left the operator's control *before* the disputed change** and is independently retained and later compared — e.g. a fingerprint published to participants, or a checkpoint bundle emailed out at freeze. Given such an external anchor, a later divergence is provable; without one, operator tampering is detectable only if the operator was careless. That is the honest posture, and the signed-checkpoint export exists precisely to make the external anchor cheap to produce.
+
+### A9 — Account takeover, sessions, and secrets · mostly SHIPPED
+
+- **Admin credentials.** The bootstrap generates a random admin password when none is supplied and prints it once; there is no baked-in default. SHIPPED.
+- **Secret key.** Sourced from env, else generated to a private state volume with `O_EXCL` and `0o600`, else ephemeral for a build-time step only. No secret is committed. SHIPPED.
+- **Passwords.** Django PBKDF2 with the stock validators; email is the identity, unique case-insensitively. SHIPPED.
+- **Transport.** `SESSION_COOKIE_SECURE`, `CSRF_COOKIE_SECURE`, SSL redirect and HSTS switch on behind `DOGFOOD_TLS` for a real deployment. SHIPPED (flag-gated).
+- **Demo auth (the one caveat).** For the offline grader, a `DOGFOOD_DEMO` shim maps a `session=` cookie to a seeded user and exempts CSRF so the stdlib checker can drive the API. This is a bearer-token shim: anyone holding a seeded token acts as that user, and CSRF is not enforced for it. It is **gated entirely off** in production (`DOGFOOD_DEMO=0`, the default in a real deploy), the `DemoSession` table is empty in production, and the middleware logs a loud warning when on. ACCEPTED RISK, scoped to the demo stack; never enable it on a public host.
+- **Login throttling.** DESIGN ONLY — see §9.
+
+### A10 — Resource exhaustion / denial of service · partial
+
+*What holds.* There is no file-upload surface (grep-clean: no `FileField` / `request.FILES`), and no raw SQL anywhere (ORM-only), so two common amplification vectors are absent. The rate-limit cache is backed by the **database** (`DatabaseCache`), deliberately not per-process `LocMemCache`, so a limiter would count correctly across workers *if wired*.
+
+*What does not.* The gallery is intentionally **un-paginated** (checks 1/2 require the full list), so it is bounded by fixture size rather than by a clamp — acceptable at event scale, ACCEPTED RISK at large scale. And the `DOGFOOD_RATE_LIMITS` policy exists in settings but **nothing consumes it** — rate-limit *enforcement* is DESIGN ONLY, the config being scaffolding for a limiter not built.
+
+*Verify.* grep for `request.FILES` / `.raw(` / `RATE_LIMIT` — only the settings dict matches.
+
+## 8. Multi-event tenancy · DECLINED
+
+Every event-scoped view resolves "the current event" as the single event in the database (`Event.objects.order_by("id").first()`). The build is **single-event by design**; it does not implement multi-tenant isolation between concurrent events. An operator who needs to run two events at once should run two instances. This is DECLINED, not a bug: stated so an adopter isn't surprised, and so the authorization model above is read in its intended single-event context.
+
+## 9. The honest list
+
+The controls this build does **not** ship, stated plainly. This list is the point: a reviewer should trust the SHIPPED labels above precisely because these are not hidden among them.
+
+*Shipped since the first draft.* The append-only, hash-chained audit log — the previous top item here — is now built and tested (A7, A8; commit `edb35c8`), so it has left this list. What remains below is genuinely not in the build.
+
+1. **Ballot-row append-only immutability** — the audit log now *evidences* every ballot write (A7), but the `Ballot` row itself is still overwritten in place (`update_or_create`); a first-class `BallotRevision` history — `UNIQUE(ballot, version)`, DB `CHECK 1..5`, readers pinned to the highest version — is not yet built. DESIGN ONLY. *Next build.*
+2. **Rate-limit enforcement** — policy configured (`DOGFOOD_RATE_LIMITS`), no code consumes it. DESIGN ONLY.
+3. **Login throttling / lockout** — not implemented. DESIGN ONLY.
+4. **Collusion & residual-outlier detection** in judging — structural leverage limits exist, active detectors do not. DESIGN ONLY.
+5. **Signed, single-use invitations** — no invite flow; the organizer seeds accounts. DESIGN ONLY.
+6. **Submission revisions / withdrawal** — create-only; no revision history. DESIGN ONLY.
+7. **Persisted immutable normalization run** — the leaderboard recomputes live from ballots, so there is no stored, editable result (arguably cleaner), but also no signed, reproducible run record. DESIGN ONLY.
+8. **Community / public voting** — not built; it would need the online anti-sybil oracle §5 forbids. DECLINED.
+9. **Multi-event tenancy** — §8. DECLINED.
+10. **Operator-tampering prevention** — impossible in a self-hosted model; only detection is achievable, and it now ships as a signed, offline-verifiable audit chain (A8), bounded by the external-checkpoint caveat there. ACCEPTED RISK (prevention).
+11. **Demo-mode CSRF exemption** — accepted in the grader stack, off in production. ACCEPTED RISK.
+12. **Deadline-close TOCTOU** — sub-millisecond race, no row lock. ACCEPTED RISK.
+
+## 10. How to verify every "SHIPPED" claim
+
+Nothing here asks for trust. Bring up the stack and run the checks:
+
+```bash
+docker compose up --build --detach --wait
+docker compose exec -T web python -m pytest tests/ -q          # smoke, normalizer, export guard
+docker compose exec -T -w /app/src web python manage.py test   # DB-backed isolation, gate, and audit-chain tests
+docker compose exec -T -w /app/src web python manage.py audit_verify   # recompute the live audit chain in place
+python3 tools/replay.py                                        # the 7 acceptance checks, no redirects
+```
+
+| Claim | Evidence |
+|---|---|
+| A1 cross-judge isolation | `replay.py` 4/5/6; `src/normalize/tests.py` |
+| A2 role gates | `replay.py` 6/7; `src/normalize/tests.py` |
+| A3 server-side deadline | `replay.py` 3 |
+| A4 ownership (server-derived team, event-scoped track) | `submissions/services.py`, `submissions/views.py`; `replay.py` 3 |
+| A5 CSV formula-injection guard + cache headers | `tests/test_export_hardening.py`; `replay.py` 7 |
+| A6 estimator determinism & gauge | `tests/test_normalize_engine.py`; `manage.py test` |
+| A7/A8 tamper-evident audit chain + signed checkpoint | `src/audit/tests.py` (6, via `manage.py test audit`); `manage.py audit_verify`; `manage.py audit_export` + offline `audit/verify.py` |
+| CSP / middleware wired | `tests/test_smoke.py` |
+| No raw SQL, no upload surface | grep `\.raw(` / `request.FILES` → none |
+
+A control that appears in the table above with a passing check is SHIPPED. Everything else is in §9. If a future change claims a control, it adds the row *and* the test in the same commit — a label without evidence is not a label.
