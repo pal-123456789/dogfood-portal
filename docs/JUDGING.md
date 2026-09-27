@@ -94,6 +94,16 @@ lenient judges. So the normalized #1 (Iron Switch) is not the raw #1 (Salt Ledge
 field, 29 of 41 projects change rank position, though Spearman correlation with the raw order
 stays high at 0.986 — the reshuffle is concentrated near ties, not global chaos.
 
+How much judge severity is there to remove in the first place? The **raw judge spread** — the
+standard deviation of each judge's mean composite score across the 30 judges — is **σ = 0.420**
+(emitted by `normalize_report` as `raw_judge_spread`, computed straight from the fixture
+ballots). Judges do differ in average severity, but 0.420 is an **upper bound** on what
+normalization can legitimately remove, not the removable amount: in a sparse panel — 126 ballots
+over 30 judges and 41 projects, about three ballots per submission — a judge's mean also reflects
+*which* projects they were assigned, so it conflates true leniency with assignment mix. The model
+subtracts only the part separable from project quality, and cross-validation shrinks even that
+(λ = 10).
+
 But we do **not** claim a large accuracy win, because this panel does not contain one. The
 within-submission dispersion falls only 1.08× (0.542 → 0.502): DOGFOOD's judges were fairly
 consistent, so there is little severity to remove. This is the opposite of the 3× reductions
