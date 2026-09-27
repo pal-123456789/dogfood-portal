@@ -121,10 +121,12 @@ is no edit or withdraw route yet.
 
 ## `judging`
 
-### `JudgeAssignment` — table `judge_assignment` — live (read) / seed
+### `JudgeAssignment` — table `judge_assignment` — live (read + organizer-managed) / seed
 `judge` FK -> `EventMembership`; `submission` FK -> `Submission`. Constraint `uniq_judge_submission`
-= `UniqueConstraint(judge, submission)`. `judge_scores` reads only the caller's own assignments;
-there is no assignment-management UI yet.
+= `UniqueConstraint(judge, submission)`. `judge_scores` reads only the caller's own assignments. An
+organizer manages assignments in-app at `/judging/<event>/assignments` (`assign_judge` /
+`unassign_judge`, atomic + audited); a **scored** assignment cannot be removed, because its `Ballot`
+→ `BallotRevision` history cascades off it.
 
 ### `Ballot` — table `ballot` — live (read + write) / seed
 `assignment` OneToOne -> `JudgeAssignment`; `functionality`, `quality`, `innovation`
@@ -139,11 +141,13 @@ version)` (write-once per version) and `ck_ballotrevision_scores_1_5`. Migration
 `v1` for every pre-existing ballot; a fresh seed writes `v1` directly. This is the tamper-evident
 score history behind the denormalized `Ballot`.
 
-### `RubricWeight` — table `rubric_weight` — seed only
+### `RubricWeight` — table `rubric_weight` — seeded, organizer-editable
 `event` FK; `criterion` `CharField(32)`; `weight` `FloatField` (default `1.0`). Constraint
-`uniq_event_criterion` = `UniqueConstraint(event, criterion)`. Seeded with equal weights; there is no
-weight-editing endpoint. *(There is no `Rubric`, `Criterion`, or standalone `Score` table — scores
-live on `Ballot` / `BallotRevision`.)*
+`uniq_event_criterion` = `UniqueConstraint(event, criterion)`. Seeded with equal weights and editable
+by an organizer at `/judging/<event>/rubric` (`set_rubric_weights`, atomic + audited
+`rubric.reweighted`); read live only by the leaderboard preview and the next signed run, so
+re-weighting never rewrites an already-published result. *(There is no `Rubric`, `Criterion`, or
+standalone `Score` table — scores live on `Ballot` / `BallotRevision`.)*
 
 ## `normalize`
 

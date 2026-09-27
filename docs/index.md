@@ -22,6 +22,11 @@ written to be checkable line-by-line against `src/`.
 - **In-app judge scoring** — a judge scores the submissions assigned to them at
   `GET`/`POST /judging/score`; every write appends an immutable, audited ballot revision, so a
   changed score never overwrites its history (`src/judging/views.py`, `services.py`).
+- **Organizer control room** — an organizer manages judge assignments, sets rubric weights, and
+  watches judging-progress coverage under `/judging/<event>/…`; assignment and rubric writes are
+  atomic and audited (`judge.assigned` / `judge.unassigned` / `rubric.reweighted`), and a **scored**
+  assignment cannot be unassigned because its ballot history is append-only
+  (`src/judging/{views,services}.py`).
 - **Organizer CSV export** — organizers export scored ballots as CSV with spreadsheet
   formula-injection guarding at `GET /api/export.csv` (`src/judging/{views,services}.py`).
 - **Normalized results** — organizers see an embargoed leaderboard and score diagnostics; the

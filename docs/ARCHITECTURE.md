@@ -39,9 +39,10 @@ event — all atomically, so none can exist without the others.
 ## The reachable HTTP surface
 
 The complete routing table is `src/portal/urls.py`. The five flat, un-prefixed routes below are the
-acceptance-checker contract and are kept byte-stable; the app-level `urls.py` for `gallery`,
-`events`, and `submissions` are currently empty (`app_name` + `urlpatterns = []`), so `accounts`,
-`judging`, and `normalize` are the apps that contribute *included* routes.
+acceptance-checker contract and are kept byte-stable; the app-level `urls.py` for `gallery` and
+`submissions` are currently empty (`app_name` + `urlpatterns = []`) — their views are wired as flat
+routes in `portal/urls.py` — so `accounts`, `events`, `judging`, and `normalize` are the apps that
+contribute *included* routes (`/accounts/`, `/events/`, `/judging/`, `/normalize/`).
 
 | Method(s)  | Path                          | View                        | Access |
 |------------|-------------------------------|-----------------------------|--------|
@@ -51,6 +52,10 @@ acceptance-checker contract and are kept byte-stable; the app-level `urls.py` fo
 | GET        | `/api/judge/scores`           | `judging.views.judge_scores`| judge only; own rows (`?judge=` mismatch -> 403; unauth -> 401) (checks 4–6) |
 | GET        | `/api/export.csv`             | `judging.views.export_csv`  | organizer only (check 7) |
 | GET, POST  | `/judging/score`              | `judging.views.score`       | judge only; scores own assigned queue (append-only + audited); **not** a checker route |
+| GET        | `/judging/<event>/progress`   | `judging.views.progress`    | organizer of that event; read-only coverage per judge + submission |
+| GET        | `/judging/<event>/assignments`| `judging.views.assignments` | organizer of that event; assignment console |
+| POST       | `/judging/<event>/assignments/add`, `/remove` | `judging.views.assign` / `unassign` | organizer of that event; add, or remove an **unscored** assignment (atomic + audited) |
+| GET, POST  | `/judging/<event>/rubric`     | `judging.views.rubric`      | organizer of that event; per-criterion weights (preview + next signed run) |
 | GET        | `/debug/whoami`               | `gallery.views.whoami`      | DEMO-auth proof |
 | —          | `/admin/`                     | Django admin                | staff |
 | GET/POST   | `/accounts/login/`, `/logout/`| `accounts.views`            | public login / logout |
@@ -63,7 +68,10 @@ Access control is **event-scoped**: roles come from the `EventMembership` table
 (`organizer` / `judge` / `participant`), never from global user flags. `judge_scores`,
 `export_csv`, and the `score` page all check the caller's `EventMembership` role; the normalize
 views gate on an organizer membership. The app is effectively single-event: callers resolve the current event with
-`Event.objects.order_by("id").first()`.
+`Event.objects.order_by("id").first()`. The organizer **control room** (`/judging/<event>/...`) is
+the exception to that resolution — it addresses the event by `ext_id` in the path and requires an
+**organizer** `EventMembership` in *that* event (`_organizer_event_or_response`: anonymous → login,
+unknown event → 404, non-organizer → 403), mirroring the events organizer UI.
 
 ## The eight code units
 
@@ -74,9 +82,9 @@ Seven domain apps plus the `portal` config package (`INSTALLED_APPS`):
 | `portal`      | settings, root URLconf, WSGI, the two middlewares, the rate-limit helper, bootstrap CLI | no | root URLconf |
 | `accounts`    | custom user (`AppUser`), demo-session shim, login/logout | yes | `/accounts/` |
 | `audit`       | append-only hash-chained log + Ed25519 checkpoints + offline verifier | yes | none |
-| `events`      | event / track / team / membership core graph | yes | (included, empty) |
+| `events`      | event / track / team / membership core graph | yes | `/events/` (organizer UI) |
 | `submissions` | submission create endpoint + service | yes | `submit` (flat route) |
-| `judging`     | assignments, ballots, revisions, rubric weights, scores read + CSV export + in-app scoring | yes | `judge_scores`, `export_csv` (flat), `score` (`/judging/`) |
+| `judging`     | assignments, ballots, revisions, rubric weights, scores read + CSV export + in-app scoring | yes | `judge_scores`, `export_csv` (flat), `score` + organizer control room (`progress` / `assignments` / `rubric`, all `/judging/`) |
 | `normalize`   | score-normalization engine, signed runs, publication, diagnostics | yes | `/normalize/` |
 | `gallery`     | public project listing + `whoami` | no | flat routes |
 
@@ -102,7 +110,12 @@ Ed25519 (`cryptography`).
    append-only hash chain (`prev_hash` -> `row_hash`) with a contiguous per-instance `seq`. The
    append service locks the head row `FOR UPDATE` so sequence numbers never race
    (`src/audit/service.py`); the pure chain logic and `verify_chain` live in `src/audit/hashchain.py`.
-   The head is seeded by a migration, not the request path.
+   The head is seeded by a migration, not the request path. Beyond `record_ballot` and
+   `create_submission`, the organizer control-room writes (`assign_judge`, `unassign_judge`,
+   `set_rubric_weights`) co-commit their own chained events — `judge.assigned` / `judge.unassigned`
+   / `rubric.reweighted` — in the same `transaction.atomic()` as the write, so judging
+   *configuration* rides the same tamper-evident trail as scores (a property of those service
+   paths, not a repo-wide guarantee).
 2. **Ed25519 signed checkpoints.** A checkpoint signs the chain tip under a per-deployment key at
    `/state/audit_ed25519_key.pem` (`O_EXCL`, `0600`) (`src/audit/keys.py`, `receipts.py`). Verify
    offline with `python -m audit.verify <bundle_dir>` (`src/audit/verify.py`).
@@ -177,9 +190,10 @@ means the model/service may exist but no endpoint wires it yet.
 | Signed reproducible normalization run + release bundle + verifiers | **Shipped** | `src/normalize/{signing,verify,release}.py` |
 | Submission-write / login rate limiting | **Shipped** | `src/portal/ratelimit.py` |
 | **In-app judge scoring** (submit a ballot over HTTP) | **Shipped** | `src/judging/{views,services}.py`, `GET/POST /judging/score` |
-| **Judge-assignment management UI** | *Planned* — dedicated UI; assignments are seeded and editable via the Django admin | `src/judging/models.py`, `src/judging/admin.py` |
-| **Event / team creation UI** | *Planned* — created by the `dogfood_import` seed; editable via the Django admin | `src/events/management/commands/`, `src/events/admin.py` |
-| **Rubric-weight editing** | *Planned* — dedicated UI; weights are seeded and editable via the Django admin | `src/judging/models.py`, `src/judging/admin.py` |
+| **Judging-progress dashboard** | **Shipped** — read-only assigned / scored / pending per judge and per submission | `src/judging/{views,services}.py`, `templates/judging/progress.html` |
+| **Judge-assignment management UI** | **Shipped** — organizer console; add, or remove an **unscored** assignment (atomic + audited; a scored one is refused) | `src/judging/{views,services,urls}.py`, `templates/judging/assignments.html` |
+| **Event / team creation UI** | **Shipped** — organizer creates events, tracks, and teams in-app (the `dogfood_import` seed still works) | `src/events/{views,services,urls}.py`, `templates/events/{dashboard,detail}.html` |
+| **Rubric-weight editing** | **Shipped** — organizer sets per-criterion weights (live preview + next signed run; never rewrites a published result) | `src/judging/{views,services}.py`, `templates/judging/rubric.html` |
 | **Submission edit / withdraw** | *Planned* — the endpoint is create-only | `src/submissions/views.py` |
 | **Single-use invitations** | *Not built* — no `Invite` model or flow | — |
 | **App models in Django admin** | **Shipped** — all 17 models registered; append-only/signed tables (audit, ballots, revisions, runs, publications) are inspect-only | `src/*/admin.py`, `src/portal/admin_mixins.py` |
