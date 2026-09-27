@@ -196,7 +196,7 @@ means the model/service may exist but no endpoint wires it yet.
 | **Rubric-weight editing** | **Shipped** — organizer sets per-criterion weights (live preview + next signed run; never rewrites a published result) | `src/judging/{views,services}.py`, `templates/judging/rubric.html` |
 | **Submission edit / withdraw** | *Planned* — the endpoint is create-only | `src/submissions/views.py` |
 | **Single-use invitations** | *Not built* — no `Invite` model or flow | — |
-| **App models in Django admin** | **Shipped** — all 17 models registered; append-only/signed tables (audit, ballots, revisions, runs, publications) are inspect-only | `src/*/admin.py`, `src/portal/admin_mixins.py` |
+| **App models in Django admin** | **Shipped** — all 17 models registered; append-only/signed tables (audit, ballots, revisions, runs, publications) are inspect-only, and any row whose cascade would reach a **scored** assignment (the assignment itself, or a parent `Event`/`EventMembership`/`Submission`/`Team`/`AppUser`) refuses deletion so ballot history can't be destroyed through the admin UI (raw-DB access is the A8 operator boundary) | `src/*/admin.py`, `src/portal/admin_mixins.py` |
 | **Multi-event support** | *Limitation by design* — uses the first event | `src/*/views.py` (`_current_event`) |
 
 

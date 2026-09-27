@@ -6,14 +6,22 @@ it from the form, so saving a user preserves the stored hash and the admin can n
 overwrite it with cleartext. Provision credentials with `manage.py createsuperuser` or the
 bootstrap ensure-admin step (docs/index.md). The admin's job is to inspect accounts and manage
 active/staff/role flags and the profile.
+
+Deleting a user who judged is guarded: `AppUser` is `CASCADE` above `EventMembership` -> the judge's
+`JudgeAssignment`s -> their `Ballot`s, so removing such a user here would silently destroy scored
+ballot history. `ScoredCascadeDeleteGuard` refuses that delete (and drops bulk delete); a user with
+no scored ballots below them stays deletable (THREAT-MODEL A7/A8).
 """
 from django.contrib import admin
+
+from judging.models import Ballot
+from portal.admin_mixins import ScoredCascadeDeleteGuard
 
 from .models import AppUser, DemoSession
 
 
 @admin.register(AppUser)
-class AppUserAdmin(admin.ModelAdmin):
+class AppUserAdmin(ScoredCascadeDeleteGuard, admin.ModelAdmin):
     list_display = ("email", "display_name", "is_active", "is_staff",
                     "is_superuser", "date_joined")
     list_filter = ("is_active", "is_staff", "is_superuser")
@@ -27,6 +35,9 @@ class AppUserAdmin(admin.ModelAdmin):
                                      "groups", "user_permissions")}),
         ("Important dates", {"fields": ("last_login", "date_joined")}),
     )
+
+    def cascades_into_scored(self, obj):
+        return Ballot.objects.filter(assignment__judge__user=obj).exists()
 
 
 @admin.register(DemoSession)

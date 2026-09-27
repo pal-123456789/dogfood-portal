@@ -6,12 +6,16 @@ atomic+audited creates, and the state hinge that actually opens submissions. The
 checker never touches /events/, so these are pure feature tests -- none of the five flat routes
 or base.html are exercised here.
 """
+from datetime import timedelta
+
+from django.contrib.admin.sites import AdminSite
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import RequestFactory, TestCase
 from django.utils import timezone
 
 from audit.models import AuditEvent
 from events.models import Event, EventMembership, Team, Track
+from submissions.models import Submission
 
 User = get_user_model()
 FUTURE = "2099-12-31T23:59"          # naive datetime-local shape; the service makes it aware
@@ -148,3 +152,64 @@ class EventUITests(TestCase):
         made = self._make_event(name="Later")
         self.assertLess(seed.id, made.id)
         self.assertEqual(Event.objects.order_by("id").first().ext_id, "evt_seed")
+
+
+class ParentCascadeAdminDeleteGuardTests(TestCase):
+    """Deleting a PARENT row in admin (Event / EventMembership / Team) is refused when its cascade
+    would reach a SCORED assignment, so scored Ballot/BallotRevision history cannot be destroyed
+    through the admin UI. Unscored parents stay deletable and the bulk delete action is dropped.
+    This mirrors JudgeAssignmentAdmin's direct-row guard (THREAT-MODEL A7/A8) via the shared
+    portal.admin_mixins.ScoredCascadeDeleteGuard. Raw-DB deletion is out of scope (A8 boundary).
+    """
+
+    def setUp(self):
+        from judging import services
+        # A scored branch: judge -> assignment -> Ballot beneath a team's submission in this event.
+        self.event = Event.objects.create(
+            ext_id="evt_g", name="G", state=Event.CLOSED,
+            submissions_close=timezone.now() - timedelta(days=1))
+        self.track = Track.objects.create(ext_id="trk_g", event=self.event, name="G")
+        self.team = Team.objects.create(ext_id="tm_g", event=self.event, name="G")
+        self.sub = Submission.objects.create(
+            ext_id="prj_g", event=self.event, team=self.team, track=self.track,
+            title="G", state=Submission.SUBMITTED)
+        judge_user = User.objects.create_user(email="jg@example.org", password="pw")
+        self.judge = EventMembership.objects.create(
+            user=judge_user, event=self.event, role=EventMembership.JUDGE, ext_id="mem_jg")
+        services.record_ballot(self.judge, self.sub, functionality=4, quality=4, innovation=4)
+
+        # A clean branch: an event / membership / team with no ballot anywhere below.
+        self.clean_event = Event.objects.create(
+            ext_id="evt_clean", name="C", submissions_close=timezone.now())
+        clean_user = User.objects.create_user(email="cu@example.org", password="pw")
+        self.clean_mem = EventMembership.objects.create(
+            user=clean_user, event=self.clean_event, role=EventMembership.JUDGE, ext_id="mem_c")
+        self.clean_team = Team.objects.create(
+            ext_id="tm_c", event=self.clean_event, name="C")
+
+        su = User.objects.create_user(email="su@example.org", password="pw")
+        su.is_staff = su.is_superuser = True
+        su.save()
+        self.req = RequestFactory().get("/admin/")
+        self.req.user = su
+
+    def test_event_admin_refuses_delete_when_scored_below(self):
+        from events.admin import EventAdmin
+        ma = EventAdmin(Event, AdminSite())
+        self.assertFalse(ma.has_delete_permission(self.req, self.event))
+        self.assertTrue(ma.has_delete_permission(self.req, self.clean_event))
+        self.assertNotIn("delete_selected", ma.get_actions(self.req))
+
+    def test_membership_admin_refuses_delete_of_scored_judge(self):
+        from events.admin import EventMembershipAdmin
+        ma = EventMembershipAdmin(EventMembership, AdminSite())
+        self.assertFalse(ma.has_delete_permission(self.req, self.judge))
+        self.assertTrue(ma.has_delete_permission(self.req, self.clean_mem))
+        self.assertNotIn("delete_selected", ma.get_actions(self.req))
+
+    def test_team_admin_refuses_delete_when_scored_submission_below(self):
+        from events.admin import TeamAdmin
+        ma = TeamAdmin(Team, AdminSite())
+        self.assertFalse(ma.has_delete_permission(self.req, self.team))
+        self.assertTrue(ma.has_delete_permission(self.req, self.clean_team))
+        self.assertNotIn("delete_selected", ma.get_actions(self.req))

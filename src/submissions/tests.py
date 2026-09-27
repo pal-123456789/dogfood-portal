@@ -12,11 +12,12 @@ table, and the cache is cleared per test.
 from datetime import timedelta
 
 from django.core.cache import caches
-from django.test import TestCase, override_settings
+from django.test import RequestFactory, TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import AppUser, DemoSession
 from events.models import Event, EventMembership, Team, TeamMember, Track
+from submissions.models import Submission
 
 _LOCMEM = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache",
                        "LOCATION": "submissions-tests"}}
@@ -83,3 +84,43 @@ class SubmissionDemoExemptionTests(TestCase):
             "/projects/new",
             {"track": "trk_rl_c", "title": "P"}).status_code for _ in range(5)]
         self.assertEqual(codes, [403, 403, 403, 403, 403])
+
+
+class SubmissionAdminDeleteGuardTests(TestCase):
+    """SubmissionAdmin refuses to delete a submission whose assignment is SCORED (its Ballot ->
+    BallotRevision history cascades off it), keeps an unscored submission deletable, and drops the
+    bulk delete action. This is the submission arm of the parent-cascade close (THREAT-MODEL A7/A8),
+    mirroring JudgeAssignmentAdmin's direct-row guard via ScoredCascadeDeleteGuard.
+    """
+
+    def setUp(self):
+        from judging import services
+        self.event = Event.objects.create(
+            ext_id="evt_sg", name="SG", state=Event.CLOSED,
+            submissions_close=timezone.now() - timedelta(days=1))
+        self.track = Track.objects.create(ext_id="trk_sg", event=self.event, name="SG")
+        self.team = Team.objects.create(ext_id="tm_sg", event=self.event, name="SG")
+        self.scored = Submission.objects.create(
+            ext_id="prj_scored", event=self.event, team=self.team, track=self.track,
+            title="S", state=Submission.SUBMITTED)
+        self.unscored = Submission.objects.create(
+            ext_id="prj_unscored", event=self.event, team=self.team, track=self.track,
+            title="U", state=Submission.SUBMITTED)
+        judge_user = AppUser.objects.create_user(email="jsg@t.demo", display_name="J")
+        judge = EventMembership.objects.create(
+            user=judge_user, event=self.event, role=EventMembership.JUDGE, ext_id="mem_sg")
+        services.record_ballot(judge, self.scored, functionality=3, quality=3, innovation=3)
+
+        su = AppUser.objects.create_user(email="su@t.demo", display_name="SU")
+        su.is_staff = su.is_superuser = True
+        su.save()
+        self.req = RequestFactory().get("/admin/")
+        self.req.user = su
+
+    def test_scored_submission_delete_refused_unscored_allowed(self):
+        from django.contrib.admin.sites import AdminSite
+        from submissions.admin import SubmissionAdmin
+        ma = SubmissionAdmin(Submission, AdminSite())
+        self.assertFalse(ma.has_delete_permission(self.req, self.scored))
+        self.assertTrue(ma.has_delete_permission(self.req, self.unscored))
+        self.assertNotIn("delete_selected", ma.get_actions(self.req))
