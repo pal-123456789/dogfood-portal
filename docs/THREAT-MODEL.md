@@ -29,6 +29,7 @@ Assets worth attacking, in rough priority:
 | Submission ownership | Submitting as or for another team corrupts attribution | §7 A4 |
 | Results-export integrity | A poisoned CSV can execute in the organizer's spreadsheet | §7 A5 |
 | The ranking itself (normalizer) | The whole point of the platform is a trustworthy rank | §7 A6 |
+| Official results: disclosure timing & publication integrity | Leaking a ranking early skews fairness; a mutable "official" result is unauditable | §7 A11 |
 | Ballot history / tamper-evidence | Silent edits undermine every result | §7 A7 |
 | Admin credentials, secret key | Full compromise | §7 A9 |
 
@@ -183,6 +184,20 @@ The caveat: a chain and a signing key that **both live on the operator's own hos
 
 *Verify.* grep for `request.FILES` / `.raw(` / `RATE_LIMIT` — only the settings dict matches.
 
+### A11 — Premature or unofficial results disclosure · SHIPPED · PREVENT (user boundary)
+
+*Mechanism.* A participant or outsider tries to read the ranking before the organizer has designated it official — hitting the public results route or its JSON while judging is still in progress — or treats an organizer's live-leaderboard preview as the final outcome.
+
+*Control.* The ranking is **private until an organizer publishes it, and the shipped image boots with nothing published.** The two public routes (`/normalize/results`, `/normalize/results.json`) serve only a "not published yet" state until an organizer acts; the live, recomputing leaderboard (`/normalize/`, `/normalize/leaderboard.json`) stays organizer-gated with A2's 401/403/200 shape. Publishing is an explicit, organizer-only governance step (`/normalize/results/publish`, POST, organizer-gated) that designates one **signed, reproducible run** (A6) as the official result; what the public then sees is that run's **frozen** `result` — not a live recompute — carrying its `run_ext_id` / `result_hash` / `inputs_hash` / `fingerprint`, so the published ranking cross-checks against the offline-verifiable bundle exactly like any signed run.
+
+*Append-only + atomic.* A publish never overwrites. It appends the next-version `ResultPublication` row (`UNIQUE(event_ext_id, version)`) and co-commits a `results.published` event onto the hash chain (A7) and flips `Event.results_published` — all in the same transaction as the signed run itself (`normalize/results.py` `publish_results`). Because the run's own `normalization.published` event co-commits too, one publish advances the audit chain by exactly two linked events. If any step raises, the run, **both** audit events, the publication row, and the flag all roll back together — there is no half-published state — so the record of what was published, at which version, when, and by whom is itself on the tamper-evident chain.
+
+*Status.* SHIPPED — W1.
+
+*Residual.* This is a **user-boundary** property, not an operator one. The organizer is also the operator (A8): they choose when to publish, may publish a `provisional` ranking, and — holding the signing key — a published run is evidence against *them* only under A6's caveat (public key + fingerprint pinned by an independent party before judging). "Private until published" therefore prevents a *participant or outsider* from seeing a ranking early; it does not, and does not claim to, constrain the operator.
+
+*Verify.* `src/normalize/tests.py` `ResultPublicationTests` (private-until-published, organizer-gate 401/403/200, append-only versioning, and the atomic all-or-nothing rollback); a published run then verifies offline via A6's `python -m normalize.verify`.
+
 ## 8. Multi-event tenancy · DECLINED
 
 Every event-scoped view resolves "the current event" as the single event in the database (`Event.objects.order_by("id").first()`). The build is **single-event by design**; it does not implement multi-tenant isolation between concurrent events. An operator who needs to run two events at once should run two instances. This is DECLINED, not a bug: stated so an adopter isn't surprised, and so the authorization model above is read in its intended single-event context.
@@ -228,6 +243,7 @@ python3 tools/replay.py                                        # the 7 acceptanc
 | A6 estimator determinism + signed reproducible run | `tests/test_normalize_engine.py`, `tests/test_normalize_signing.py`; `manage.py test`; `manage.py normalize_publish --export <dir>` + offline `python -m normalize.verify <dir>` |
 | A7/A8 tamper-evident audit chain + signed checkpoint | `src/audit/tests.py` (6, via `manage.py test audit`); `manage.py audit_verify`; `manage.py audit_export` + offline `audit/verify.py` |
 | A7 append-only ballot history | `src/judging/tests.py` (via `manage.py test judging`); `src/judging/models.py` `BallotRevision` |
+| A11 official results: private until published + append-only versions | `src/normalize/tests.py` `ResultPublicationTests` (via `manage.py test`); published run verifies via A6 `python -m normalize.verify` |
 | CSP / middleware wired | `tests/test_smoke.py` |
 | No raw SQL, no upload surface | grep `\.raw(` / `request.FILES` → none |
 
