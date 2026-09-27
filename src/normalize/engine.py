@@ -300,6 +300,25 @@ def compute_leaderboard(y, judge_keys, sub_keys, display, n_boot=1000, seed=0, l
     }
 
 
+def _strip_negative_zero(x):
+    """Map -0.0 -> +0.0 everywhere in a JSON-like structure (recursing into dicts and lists).
+
+    Negative zero carries no ranking information and, crucially, does not survive JSON number
+    storage: PostgreSQL's jsonb normalizes -0.0 to 0, so a run RELOADED from the database would
+    serialize `0.0` where the freshly-built, in-memory run had `-0.0` -- and its result_hash could
+    never reproduce. Folding the sign here keeps the signed projection stable across a store/reload
+    round-trip (e.g. `release_bundle`, which exports a reloaded run). `x + 0.0` maps -0.0 to +0.0
+    and is a no-op for every other float; ints, bools, and strings pass through untouched.
+    """
+    if isinstance(x, float):
+        return x + 0.0
+    if isinstance(x, dict):
+        return {k: _strip_negative_zero(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_strip_negative_zero(v) for v in x]
+    return x
+
+
 def canonical_result(result):
     """The reproducible projection of a leaderboard dict that a signed run commits to.
 
@@ -308,10 +327,13 @@ def canonical_result(result):
     raw_mean to 4 dp; sigma to 4 dp; lambda pinned to a grid value). `gauge_error` is deliberately
     DROPPED -- it is ~0 at machine precision, so its exact bits vary by BLAS backend, and it carries
     no ranking information (the verifier still recomputes it and asserts the gauge held, separately).
+    Negative zero is folded to +0.0 (see _strip_negative_zero): a rounded delta can land on -0.0,
+    which jsonb silently rewrites to 0, so the projection must not depend on a zero's sign or a
+    run reloaded from the database could never reproduce its result_hash.
     Hashing this projection -- not the raw dict -- is what lets an independent verifier confirm the
     published ranking without demanding bit-identical floating point on the diagnostic self-check.
     """
-    return {k: result[k] for k in sorted(result) if k != "gauge_error"}
+    return _strip_negative_zero({k: result[k] for k in sorted(result) if k != "gauge_error"})
 
 
 

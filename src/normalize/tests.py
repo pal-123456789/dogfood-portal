@@ -557,3 +557,170 @@ class ReviewDiagnosticsViewTests(TestCase):
         self.assertEqual(data["coverage"]["articulation_judges"], [])
         self.assertEqual(data["ballot_influence"]["winner_changes"], 0)   # no single ballot flips it
 
+
+class ReleaseBundleTests(TestCase):
+    """The unified, offline-verifiable RELEASE bundle (#37): one directory that binds the published
+    ranking -> a signed normalization run -> a `normalization.published` event ON the audit chain ->
+    a signed audit checkpoint. Reuses the perfectly-additive 3x3 fixture (prj_a first), signs the run
+    AND the checkpoint with ONE test key, and asserts: `release_bundle` writes all nine files and the
+    bundle self-verifies; then a tamper matrix -- a flipped ranking.csv, an edited result.json, a
+    truncated audit prefix, and a FORGED (unsigned) audit_seq -- each makes verification FAIL, and the
+    CSV / audit_seq tampers fail EXACTLY the new cross-links while both sub-verifiers still pass."""
+
+    FILES = ("run.json", "inputs.json", "result.json", "public-key.pem", "audit-prefix.jsonl",
+             "checkpoint.json", "ranking.csv", "release.json", "verification-instructions.txt")
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.event = Event.objects.create(
+            ext_id="evt_rel", name="Release Event", state=Event.CLOSED,
+            submissions_close=timezone.now() - timezone.timedelta(days=1))
+        track = Track.objects.create(ext_id="trk_rel", event=cls.event, name="R")
+        team = Team.objects.create(ext_id="tm_rel", event=cls.event, name="Team")
+        for c in engine.CRITERIA:
+            RubricWeight.objects.create(event=cls.event, criterion=c, weight=1.0)
+        subs = {}
+        for sid in ("prj_a", "prj_b", "prj_c"):
+            subs[sid] = Submission.objects.create(
+                ext_id=sid, event=cls.event, team=team, track=track,
+                title="Title %s" % sid, state=Submission.SUBMITTED)
+        base = {"prj_a": 4, "prj_b": 3, "prj_c": 2}
+        bias = [0, 1, -1]
+        for n in range(3):
+            u = User.objects.create_user(email="reljudge%d@t.demo" % n, display_name="RelJ%d" % n)
+            m = EventMembership.objects.create(
+                user=u, event=cls.event, role=EventMembership.JUDGE, ext_id="jdg_rel%d" % n)
+            for sid, sub in subs.items():
+                a = JudgeAssignment.objects.create(judge=m, submission=sub)
+                v = base[sid] + bias[n]
+                Ballot.objects.create(assignment=a, functionality=v, quality=v, innovation=v)
+
+    def setUp(self):
+        from audit import receipts
+        self.key = receipts.generate_private_key()
+        self.pub, self.run = results.publish_results(
+            self.event, key=self.key, note="Final.", n_boot=120, seed=0)
+
+    def _export(self, d):
+        from io import StringIO
+        from unittest import mock
+        from django.core.management import call_command
+        with mock.patch("normalize.management.commands.release_bundle.keys.ensure_private_key",
+                        return_value=(self.key, False)):
+            call_command("release_bundle", d, stdout=StringIO())
+
+    @staticmethod
+    def _named(checks, needle):
+        return [(n, ok, det) for n, ok, det in checks if needle in n]
+
+    def test_bundle_self_verifies_with_all_files(self):
+        import os
+        import tempfile
+        from normalize import release
+        with tempfile.TemporaryDirectory() as d:
+            self._export(d)
+            for fname in self.FILES:
+                self.assertTrue(os.path.exists(os.path.join(d, fname)), "missing %s" % fname)
+            ok, checks = release.verify_release(d)
+            self.assertTrue(ok, checks)
+            self.assertTrue(all(passed for _n, passed, _det in checks))
+            for needle in ("share one signer", "committed in the audit chain",
+                           "within the signed checkpoint", "ranking.csv matches"):
+                got = self._named(checks, needle)
+                self.assertEqual(len(got), 1, needle)
+                self.assertTrue(got[0][1], got)
+
+    def test_tampered_ranking_csv_fails_only_that_crosslink(self):
+        import os
+        import tempfile
+        from normalize import release
+        with tempfile.TemporaryDirectory() as d:
+            self._export(d)
+            p = os.path.join(d, "ranking.csv")
+            with open(p, encoding="utf-8") as fh:
+                text = fh.read()
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(text.replace("prj_a", "prj_X", 1))
+            ok, checks = release.verify_release(d)
+            self.assertFalse(ok)
+            self.assertFalse(self._named(checks, "ranking.csv matches")[0][1])
+            self.assertTrue(all(ok for n, ok, _d in checks if n.startswith("audit/")))
+            self.assertTrue(all(ok for n, ok, _d in checks if n.startswith("run/")))
+
+    def test_forged_audit_seq_fails_crosslink_though_signature_valid(self):
+        import json
+        import os
+        import tempfile
+        from normalize import release
+        with tempfile.TemporaryDirectory() as d:
+            self._export(d)
+            p = os.path.join(d, "run.json")
+            with open(p, encoding="utf-8") as fh:
+                data = json.load(fh)
+            data["audit_seq"] = 999999            # unsigned back-pointer -> repoint at a phantom event
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+            ok, checks = release.verify_release(d)
+            self.assertFalse(ok)
+            # the run's SIGNATURE still verifies (audit_seq is not in RUN_FIELDS) ...
+            self.assertTrue(all(ok for n, ok, _d in checks if n.startswith("run/")))
+            # ... but the chain-commit cross-link rejects the forged seq.
+            self.assertFalse(self._named(checks, "committed in the audit chain")[0][1])
+
+    def test_tampered_result_json_fails_run_verifier(self):
+        import json
+        import os
+        import tempfile
+        from normalize import release
+        with tempfile.TemporaryDirectory() as d:
+            self._export(d)
+            p = os.path.join(d, "result.json")
+            with open(p, encoding="utf-8") as fh:
+                data = json.load(fh)
+            data["rows"][0]["q"] = data["rows"][0]["q"] + 1.0
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+            self.assertFalse(release.verify_release(d)[0])
+
+    def test_truncated_audit_prefix_fails_audit_verifier(self):
+        import os
+        import tempfile
+        from normalize import release
+        with tempfile.TemporaryDirectory() as d:
+            self._export(d)
+            p = os.path.join(d, "audit-prefix.jsonl")
+            with open(p, encoding="utf-8") as fh:
+                lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines[:-1]) + "\n")   # drop the signed head row
+            self.assertFalse(release.verify_release(d)[0])
+
+
+class ReleaseVerifyPureTests(SimpleTestCase):
+    """Pure (no DB) tests of the canonical ranking CSV -- the exact bytes the exporter writes and the
+    offline verifier regenerates. Both ends call `ranking_csv`, so byte-identity holds by construction;
+    these pin the format (LF terminators, csv-quoted titles, compact floats) so a later change cannot
+    silently alter it, and lock the cell formatter's bool / None / float rules."""
+
+    def test_cell_formatter_rules(self):
+        from normalize import release
+        self.assertEqual(release._fmt(True), "true")
+        self.assertEqual(release._fmt(False), "false")
+        self.assertEqual(release._fmt(None), "")
+        self.assertEqual(release._fmt(4.0), "4")        # compact float: no trailing ".0"
+        self.assertEqual(release._fmt(1.5), "1.5")
+        self.assertEqual(release._fmt(3), "3")
+
+    def test_ranking_csv_is_canonical(self):
+        from normalize import release
+        result = {"rows": [
+            {"rank": 1, "submission": "prj_a", "title": "Hello, World", "track": "trk_1",
+             "q": 1.5, "raw_mean": 4.0, "delta": 0.5, "rank_lo": 1, "rank_median": 1.0,
+             "rank_hi": 2, "n_ballots": 3, "tied_with_next": False, "component": 0}]}
+        header = ("rank,submission,title,track,q,raw_mean,delta,rank_lo,rank_median,"
+                  "rank_hi,n_ballots,tied_with_next,component\n")
+        row = '1,prj_a,"Hello, World",trk_1,1.5,4,0.5,1,1,2,3,false,0\n'
+        self.assertEqual(release.ranking_csv(result), header + row)   # comma-title gets csv-quoted
+        self.assertEqual(release.ranking_csv({"rows": []}), header)   # header-only when empty
+        self.assertEqual(release.ranking_csv(result), release.ranking_csv(result))  # deterministic
+
