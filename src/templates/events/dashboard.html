@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Organize — dogfood portal{% endblock %}
+{% block content %}
+<div class="lede">
+  <h1>Organizer dashboard</h1>
+  <p>Create an event and manage its tracks, teams and submission window.</p>
+</div>
+
+{% if error %}<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">{{ error }}</div>{% endif %}
+
+<h3>Your events</h3>
+{% if events %}
+<div class="grid">
+  {% for e in events %}
+  <div class="card">
+    <h3><a href="{% url 'events:detail' e.ext_id %}">{{ e.name }}</a></h3>
+    <div class="meta">
+      <span class="tag">{{ e.state }}</span>
+      <span class="tag">{{ e.ext_id }}</span>
+      {% if e.results_published %}<span class="tag">results published</span>{% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="empty">You don't organize any events yet. Create one below.</p>
+{% endif %}
+
+<h3>New event</h3>
+<form class="stack" method="post" action="{% url 'events:create' %}">
+  {% csrf_token %}
+  <label>Event name
+    <input type="text" name="name" value="{{ form.name }}" maxlength="200" required>
+  </label>
+  <label>Submissions close
+    <input type="datetime-local" name="submissions_close" value="{{ form.submissions_close }}" required>
+  </label>
+  <button type="submit">Create event</button>
+</form>
+{% endblock %}

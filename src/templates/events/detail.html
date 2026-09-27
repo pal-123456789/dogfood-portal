@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}{{ event.name }} — organize — dogfood portal{% endblock %}
+{% block content %}
+<div class="lede">
+  <h1>{{ event.name }}</h1>
+  <p><code>{{ event.ext_id }}</code> · state <code>{{ event.state }}</code> ·
+     {% if accepting %}accepting submissions{% else %}not accepting submissions{% endif %}</p>
+</div>
+
+{% if error %}<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">{{ error }}</div>{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+
+<h3>Submission window</h3>
+<p class="empty" style="padding:6px 0">Closes <code>{{ event.submissions_close }}</code>. An event accepts
+   submissions only while it is <code>open</code> and before that time.</p>
+<form class="stack" method="post" action="{% url 'events:set_state' event.ext_id %}">
+  {% csrf_token %}
+  <label>State
+    <select name="state">
+      {% for value, label in states %}<option value="{{ value }}"{% if event.state == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <button type="submit">Update state</button>
+</form>
+
+<h3>Tracks</h3>
+{% if tracks %}
+<div class="filters">{% for t in tracks %}<span class="chip">{{ t.name }} · <span class="mono">{{ t.ext_id }}</span></span>{% endfor %}</div>
+{% else %}<p class="empty">No tracks yet.</p>{% endif %}
+<form class="stack" method="post" action="{% url 'events:create_track' event.ext_id %}">
+  {% csrf_token %}
+  <label>New track name<input type="text" name="name" maxlength="200" required></label>
+  <button type="submit">Add track</button>
+</form>
+
+<h3>Teams</h3>
+{% if teams %}
+<div class="filters">{% for tm in teams %}<span class="chip">{{ tm.name }} · <span class="mono">{{ tm.ext_id }}</span></span>{% endfor %}</div>
+{% else %}<p class="empty">No teams yet.</p>{% endif %}
+<form class="stack" method="post" action="{% url 'events:create_team' event.ext_id %}">
+  {% csrf_token %}
+  <label>New team name<input type="text" name="name" maxlength="200" required></label>
+  <button type="submit">Add team</button>
+</form>
+
+<p style="margin-top:30px"><a href="{% url 'events:dashboard' %}">← all your events</a></p>
+{% endblock %}
