@@ -56,60 +56,21 @@ def _display(event):
             for s in Submission.objects.filter(event=event).select_related("track")}
 
 
-def leaderboard(event, n_boot=1000, seed=0):
+def leaderboard(event, n_boot=1000, seed=0, lam=None):
     """Normalized ranking + bootstrap uncertainty for the event, JSON-serializable.
 
-    Both the HTML and the JSON view render this dict. Returns rows=[] when no ballots exist
-    yet so the page degrades gracefully instead of raising.
+    Both the HTML and the JSON view render this dict. The assembly lives in
+    engine.compute_leaderboard -- the SAME pure function the offline verifier (normalize.verify)
+    runs -- so a published, signed run reproduces this exact dict byte for byte. Returns rows=[]
+    when no ballots exist yet so the page degrades gracefully instead of raising. `lam=None`
+    self-selects lambda (the live default); a published run passes its pinned lambda so
+    reproduction never re-runs CV.
     """
     y, jk, sk = observed(event)
     if not y:
         return {"rows": [], "n_ballots": 0}
-    comp_by_sub, comp_by_judge, ncomp = engine.connected_components(jk, sk)
-    rep = engine.rank_report(y, jk, sk, n_boot=n_boot, seed=seed)
-    gauge = engine.component_gauge_error(rep["b"], comp_by_judge)
-    raw = engine.raw_means(y, sk)
-    disp = _display(event)
-    counts = {}
-    for s in sk:
-        counts[s] = counts.get(s, 0) + 1
-    subs = rep["subs"]
-    idx = {s: i for i, s in enumerate(subs)}
-    q = {s: float(rep["q"][i]) for i, s in enumerate(subs)}
-    order = sorted(subs, key=lambda s: -q[s])
-    unresolved = {frozenset((a, c)) for (a, c, _p, _dq) in rep["unresolved"]}
-    rows = []
-    for pos, s in enumerate(order, start=1):
-        i = idx[s]
-        title, track = disp.get(s, (s, ""))
-        tied_next = pos < len(order) and frozenset((s, order[pos])) in unresolved
-        rows.append({
-            "rank": pos,
-            "submission": s,
-            "title": title,
-            "track": track,
-            "q": round(q[s], 4),
-            "raw_mean": round(float(raw[s]), 4),
-            "delta": round(q[s] - float(raw[s]), 4),
-            "rank_lo": int(rep["rank_lo"][i]),
-            "rank_median": int(rep["rank_median"][i]),
-            "rank_hi": int(rep["rank_hi"][i]),
-            "n_ballots": counts.get(s, 0),
-            "tied_with_next": tied_next,
-            "component": comp_by_sub[s],
-        })
-    return {
-        "rows": rows,
-        "n_ballots": len(y),
-        "n_submissions": len(subs),
-        "n_judges": len(rep["b"]),
-        "lambda": float(rep["lambda"]),
-        "sigma": round(float(rep["sigma"]), 4),
-        "n_components": ncomp,
-        "gauge_error": float(gauge),
-        "n_boot": rep["n_boot"],
-        "unresolved_count": len(rep["unresolved"]),
-    }
+    return engine.compute_leaderboard(y, jk, sk, _display(event),
+                                      n_boot=n_boot, seed=seed, lam=lam)
 
 def _spearman(a, b):
     """Rank correlation with no scipy dependency: Pearson on the rank-transformed vectors."""

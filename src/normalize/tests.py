@@ -14,11 +14,14 @@ from django.contrib.auth import get_user_model
 from django.test import Client, SimpleTestCase, TestCase
 from django.utils import timezone
 
+from audit.models import AuditEvent
+from audit.service import current_head
 from events.models import Event, EventMembership, Team, Track
 from judging.models import Ballot, JudgeAssignment, RubricWeight
 from submissions.models import Submission
 
-from normalize import engine, services
+from normalize import engine, runs, services, signing, verify
+from normalize.models import NormalizationRun
 
 User = get_user_model()
 
@@ -146,3 +149,108 @@ class NormalizeServiceTests(TestCase):
         js = c.get("/normalize/leaderboard.json")
         self.assertEqual(js.status_code, 200)
         self.assertEqual(js.json()["rows"][0]["submission"], "prj_a")
+
+
+class NormalizationRunTests(TestCase):
+    """DB-backed tests for the signed, reproducible run (P2). Reuses the perfectly-additive
+    fixture shape so the ranking is unambiguous, then asserts: a published run persists with a
+    signature that verifies; a `normalization.published` event is co-committed on the audit chain
+    (seq advances by exactly one, payload cross-links the run); the exported bundle verifies
+    offline; tampering any bundle file fails verification; a same-seed rebuild reproduces the same
+    inputs/result hashes; and -- the killer -- if the run INSERT fails, the atomic co-commit rolls
+    the audit event back too (no run-without-record, no record-without-run)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.event = Event.objects.create(
+            ext_id="evt_r", name="Run Event", state=Event.CLOSED,
+            submissions_close=timezone.now() - timezone.timedelta(days=1))
+        track = Track.objects.create(ext_id="trk_r", event=cls.event, name="R")
+        team = Team.objects.create(ext_id="tm_r", event=cls.event, name="Team")
+        for c in engine.CRITERIA:
+            RubricWeight.objects.create(event=cls.event, criterion=c, weight=1.0)
+        subs = {}
+        for sid in ("prj_a", "prj_b", "prj_c"):
+            subs[sid] = Submission.objects.create(
+                ext_id=sid, event=cls.event, team=team, track=track,
+                title="Title %s" % sid, state=Submission.SUBMITTED)
+        base = {"prj_a": 4, "prj_b": 3, "prj_c": 2}
+        bias = [0, 1, -1]
+        for n in range(3):
+            u = User.objects.create_user(email="rjudge%d@t.demo" % n, display_name="RJ%d" % n)
+            m = EventMembership.objects.create(
+                user=u, event=cls.event, role=EventMembership.JUDGE, ext_id="jdg_r%d" % n)
+            for sid, sub in subs.items():
+                a = JudgeAssignment.objects.create(judge=m, submission=sub)
+                v = base[sid] + bias[n]
+                Ballot.objects.create(assignment=a, functionality=v, quality=v, innovation=v)
+
+    def _key(self):
+        from audit import receipts
+        return receipts.generate_private_key()
+
+    def test_publish_creates_signed_run_and_audit_event(self):
+        key = self._key()
+        head0 = current_head().seq
+        run = runs.publish_run(self.event, key=key, n_boot=120, seed=0)
+        self.assertTrue(NormalizationRun.objects.filter(pk=run.pk).exists())
+        self.assertTrue(signing.verify_run(
+            key.public_key(), signature=run.signature, engine_version=run.engine_version,
+            instance_id=run.instance_id, event_ext_id=run.event_ext_id,
+            run_ext_id=run.run_ext_id, inputs_hash=run.inputs_hash,
+            result_hash=run.result_hash, created_at=run.created_at))
+        self.assertEqual(current_head().seq, head0 + 1)      # chain advanced by exactly one
+        ev = AuditEvent.objects.get(seq=run.audit_seq)
+        self.assertEqual(ev.event_type, "normalization.published")
+        self.assertEqual(ev.object_id, run.run_ext_id)
+        self.assertEqual(ev.payload["result_hash"], run.result_hash)
+        self.assertEqual(run.result["rows"][0]["submission"], "prj_a")
+
+    def test_result_hash_stable_across_builds_same_seed(self):
+        key = self._key()
+        b1 = runs.build_run(self.event, key=key, n_boot=120, seed=0)
+        b2 = runs.build_run(self.event, key=key, n_boot=120, seed=0)
+        self.assertEqual(b1["inputs_hash"], b2["inputs_hash"])
+        self.assertEqual(b1["result_hash"], b2["result_hash"])
+        self.assertNotEqual(b1["run_ext_id"], b2["run_ext_id"])   # id/signature still unique
+
+    def test_export_bundle_verifies_offline(self):
+        import tempfile
+        key = self._key()
+        run = runs.publish_run(self.event, key=key, n_boot=120, seed=0)
+        with tempfile.TemporaryDirectory() as d:
+            runs.export_bundle(run, key.public_key(), d)
+            ok, checks = verify.verify_bundle(d)
+            self.assertTrue(ok, checks)
+            self.assertTrue(all(passed for _n, passed, _d in checks))
+
+    def test_tampered_inputs_fail_verification(self):
+        import json
+        import os
+        import tempfile
+        key = self._key()
+        run = runs.publish_run(self.event, key=key, n_boot=120, seed=0)
+        with tempfile.TemporaryDirectory() as d:
+            runs.export_bundle(run, key.public_key(), d)
+            p = os.path.join(d, "inputs.json")
+            with open(p, encoding="utf-8") as fh:
+                data = json.load(fh)
+            b0 = data["ballots"][0]
+            b0["functionality"] = 1 if b0["functionality"] != 1 else 5
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+            ok, _checks = verify.verify_bundle(d)
+            self.assertFalse(ok)
+
+    def test_run_insert_failure_rolls_back_audit_event(self):
+        from unittest import mock
+        key = self._key()
+        head0 = current_head().seq
+        count0 = NormalizationRun.objects.count()
+        with mock.patch.object(NormalizationRun.objects, "create",
+                               side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                runs.publish_run(self.event, key=key, n_boot=120, seed=0)
+        self.assertEqual(NormalizationRun.objects.count(), count0)   # no orphan run
+        self.assertEqual(current_head().seq, head0)                  # and no orphan chain record
+

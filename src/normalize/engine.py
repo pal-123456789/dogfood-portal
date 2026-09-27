@@ -30,6 +30,14 @@ import numpy as np
 
 CRITERIA = ("functionality", "quality", "innovation")
 
+# FROZEN math-version pin, baked into every signed normalization run (normalize/signing.py) so a
+# published result names the exact estimator that produced it. Bump ONLY when the math below
+# changes in a way that could move q -- an offline verifier re-running a different engine on the
+# same inputs must be able to tell it is not the version that signed the bundle. v1 = this file:
+# weighted composite -> ridge/partial-pooling fit (penalty on b only) -> per-component mean(b)=0
+# gauge -> CV-selected lambda -> parametric bootstrap ranks.
+ENGINE_VERSION = "ridge-additive-v1"
+
 # Ridge grid: excludes 0 (singular); brackets the CV minimum on data of this shape (~10).
 LAMBDA_GRID = (0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0)
 
@@ -231,6 +239,79 @@ def rank_report(y, judge_keys, sub_keys, lam=None, n_boot=1000, seed=0):
         "win_prob": win, "n_boot": n_boot,
         "unresolved": _unresolved_pairs(subs, q_point, win),
     }
+
+
+def compute_leaderboard(y, judge_keys, sub_keys, display, n_boot=1000, seed=0, lam=None):
+    """Pure, DB-free assembly of the leaderboard dict -- the SINGLE code path shared by the live
+    view (normalize.services.leaderboard) and the offline verifier (normalize.verify). Because both
+    call this identical function on the same pinned inputs, a signed run reproduces byte for byte.
+
+    `display` maps sub_key -> (title, track_ext_id). `lam` is normally PINNED from a published run
+    so reproduction never re-runs CV (a knife-edge grid tie could otherwise pick a neighbouring
+    lambda on a different BLAS build); passing lam=None reproduces the live view's self-selecting
+    behaviour. Returns rows=[] when no ballots exist so the page degrades instead of raising.
+    """
+    y = list(y)
+    if not y:
+        return {"rows": [], "n_ballots": 0}
+    comp_by_sub, comp_by_judge, ncomp = connected_components(judge_keys, sub_keys)
+    rep = rank_report(y, judge_keys, sub_keys, lam=lam, n_boot=n_boot, seed=seed)
+    gauge = component_gauge_error(rep["b"], comp_by_judge)
+    raw = raw_means(y, sub_keys)
+    counts = {}
+    for s in sub_keys:
+        counts[s] = counts.get(s, 0) + 1
+    subs = rep["subs"]
+    idx = {s: i for i, s in enumerate(subs)}
+    q = {s: float(rep["q"][i]) for i, s in enumerate(subs)}
+    order = sorted(subs, key=lambda s: -q[s])
+    unresolved = {frozenset((a, c)) for (a, c, _p, _dq) in rep["unresolved"]}
+    rows = []
+    for pos, s in enumerate(order, start=1):
+        i = idx[s]
+        title, track = display.get(s, (s, ""))
+        tied_next = pos < len(order) and frozenset((s, order[pos])) in unresolved
+        rows.append({
+            "rank": pos,
+            "submission": s,
+            "title": title,
+            "track": track,
+            "q": round(q[s], 4),
+            "raw_mean": round(float(raw[s]), 4),
+            "delta": round(q[s] - float(raw[s]), 4),
+            "rank_lo": int(rep["rank_lo"][i]),
+            "rank_median": int(rep["rank_median"][i]),
+            "rank_hi": int(rep["rank_hi"][i]),
+            "n_ballots": counts.get(s, 0),
+            "tied_with_next": tied_next,
+            "component": comp_by_sub[s],
+        })
+    return {
+        "rows": rows,
+        "n_ballots": len(y),
+        "n_submissions": len(subs),
+        "n_judges": len(rep["b"]),
+        "lambda": float(rep["lambda"]),
+        "sigma": round(float(rep["sigma"]), 4),
+        "n_components": ncomp,
+        "gauge_error": float(gauge),
+        "n_boot": rep["n_boot"],
+        "unresolved_count": len(rep["unresolved"]),
+    }
+
+
+def canonical_result(result):
+    """The reproducible projection of a leaderboard dict that a signed run commits to.
+
+    Every field kept here reproduces exactly from the same pinned inputs on any machine: integer
+    counts/ranks, string labels, and floats already rounded to a published precision (q, delta and
+    raw_mean to 4 dp; sigma to 4 dp; lambda pinned to a grid value). `gauge_error` is deliberately
+    DROPPED -- it is ~0 at machine precision, so its exact bits vary by BLAS backend, and it carries
+    no ranking information (the verifier still recomputes it and asserts the gauge held, separately).
+    Hashing this projection -- not the raw dict -- is what lets an independent verifier confirm the
+    published ranking without demanding bit-identical floating point on the diagnostic self-check.
+    """
+    return {k: result[k] for k in sorted(result) if k != "gauge_error"}
 
 
 
