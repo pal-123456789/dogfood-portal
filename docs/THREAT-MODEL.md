@@ -66,7 +66,7 @@ For each threat we aim for the strongest posture the offline constraint allows:
 - **DETECT** — the attack is visible after the fact.
 - **EVIDENT & REVERSIBLE** — tampering leaves a trail and can be undone.
 
-Honestly: this build achieves **PREVENT** for the user-boundary threats (isolation, role, deadline, ownership, export). For DETECT / EVIDENT it now ships the append-only, hash-chained audit log those postures depend on (§7 A7, A8): every ballot and submission write appends an immutable, chained audit event in the same transaction, and an organizer can recompute the chain — and check a signed checkpoint — offline. The one honest limit is the operator boundary (§7 A8): a chain and a signing key that both live on the operator's own host detect tampering only *relative to a signed checkpoint that left the operator's control before the disputed change*. Prevention against the operator remains out of reach by construction — a property of self-hosting, not a missing feature.
+Honestly: this build achieves **PREVENT** for the user-boundary threats (isolation, role, deadline, ownership, export). For DETECT / EVIDENT it now ships the append-only, hash-chained audit log those postures depend on (§7 A7, A8): every ballot and submission write appends an immutable, chained audit event in the same transaction, and an organizer can recompute the chain — and check a signed checkpoint — offline. Ballot edits are additionally **EVIDENT & REVERSIBLE** — each write appends an immutable `BallotRevision`, so a prior score survives as its own row (§7 A7) — and a published ranking can be frozen as a signed, offline-reproducible run (§7 A6). The one honest limit is the operator boundary (§7 A8): a chain and a signing key that both live on the operator's own host detect tampering only *relative to a signed checkpoint that left the operator's control before the disputed change*. Prevention against the operator remains out of reach by construction — a property of self-hosting, not a missing feature.
 
 ## 7. Threats
 
@@ -132,7 +132,7 @@ Each threat gives the mechanism, the control, its status, the residual, and the 
 
 *Verify.* `tests/test_export_hardening.py` (the guard, DB-free); `tools/replay.py` check 7 (export still valid).
 
-### A6 — Gaming the normalizer · estimator SHIPPED · detectors DESIGN ONLY
+### A6 — Gaming the normalizer · estimator + signed reproducible run SHIPPED · collusion detectors DESIGN ONLY
 
 *Mechanism.* A judge tries to move the ranking by scoring strategically — inflating an ally, tanking a rival, or exploiting leniency — rather than honestly.
 
@@ -140,21 +140,23 @@ Each threat gives the mechanism, the control, its status, the residual, and the 
 
 *Status.* The estimator and its determinism are SHIPPED (`tests/test_normalize_engine.py`, `src/normalize/tests.py`). Active **collusion detectors** — residual-outlier reports, exact-match ballot detection, zero-variance-judge exclusion — are **DESIGN ONLY**: the seams are understood but the code is not in this build.
 
+*Signed, reproducible run (SHIPPED — P2).* Beyond the live leaderboard, an operator can now publish a **signed, reproducible normalization run** (`src/normalize/runs.py`, `manage.py normalize_publish`). It freezes the exact inputs the ranking consumed — the weighted ballots in a pinned order, each pinned to its `BallotRevision` version (A7), the rubric weights, and the pinned λ — hashes the inputs and the canonical result, signs the pair with the **same Ed25519 operator key as the audit checkpoints** (a distinct domain tag `dogfood.normalize.run.v1` keeps a run signature from ever being replayed as a checkpoint, and vice-versa — proven both directions in `tests/test_normalize_signing.py`), and co-commits a `normalization.published` event onto the audit chain in one transaction, so a run can neither exist without its chain record nor leave a chain record without a run. An independent party runs `python -m normalize.verify <bundle>` on a machine that never touched the deployment: it re-runs the estimator from the pinned inputs through the *same* `engine.compute_leaderboard` code path the live view uses and confirms the ranking canonicalises to the signed `result_hash` (`gauge_error` is excluded from the hash — it is ~0 at machine precision and bit-volatile across BLAS backends — and re-asserted `< 1e-6` separately). Honest scope mirrors A8: a PASS proves the published ranking is exactly what this engine version produces from those ballots and that a run signed by the pinned key committed to it — it is evidence against the *operator* only if the public key + fingerprint were pinned by an independent party **before** judging, since the operator holds the private key and could re-sign a different run.
+
 *Residual.* A coordinated ring of judges sharing many submissions could still bias results within their component. Detecting that is the DESIGN-ONLY work above. ACCEPTED for this build, and named in §9.
 
-*Verify.* `tests/test_normalize_engine.py`; `manage.py test` (normalize service tests); JUDGING.md for the derivation and the honest within-submission σ-reduction on the real fixture.
+*Verify.* `tests/test_normalize_engine.py` and `tests/test_normalize_signing.py` (DB-free); `manage.py test` (normalize service + run tests); `manage.py normalize_publish --export <dir>` then offline `python -m normalize.verify <dir>`; JUDGING.md for the derivation and the honest within-submission σ-reduction on the real fixture.
 
-### A7 — Silent ballot tampering / missing tamper-evidence · audit log SHIPPED · EVIDENT (ballot-row freeze DESIGN ONLY)
+### A7 — Silent ballot tampering / missing tamper-evidence · audit log + append-only ballot history SHIPPED · EVIDENT
 
 *Mechanism.* A ballot is changed after the fact — by a judge revising quietly, or by anyone with app write access — with no record that it happened.
 
-*Control (shipped).* Every write that matters now appends an immutable, hash-chained audit event. `record_ballot` and `create_submission` each call `audit.service.record_event` **inside the same `transaction.atomic()` as the business write**, so a score can never be persisted without its audit row, nor the reverse — the rollback is asserted by `test_business_write_rolls_back_when_audit_append_raises`. Each event carries a frozen schema-v1 header plus a `payload_hash` / `prev_hash` / `row_hash` triple; `seq` is issued from a single `AuditHead` row locked `FOR UPDATE`, never from an auto-increment PK (Postgres sequences gap on rollback and would silently hole the chain). `audit.hashchain.verify_chain` recomputes the whole chain and pinpoints the first `seq` where an insert, delete, reorder, or edit breaks the linkage. So a judge who revises a ballot leaves **two** chained events — the prior scores survive in the earlier one — and any edit to a stored audit row is detectable.
+*Control (shipped).* Every write that matters now appends an immutable, hash-chained audit event. `record_ballot` and `create_submission` each call `audit.service.record_event` **inside the same `transaction.atomic()` as the business write**, so a score can never be persisted without its audit row, nor the reverse — the rollback is asserted by `test_business_write_rolls_back_when_audit_append_raises`. Each event carries a frozen schema-v1 header plus a `payload_hash` / `prev_hash` / `row_hash` triple; `seq` is issued from a single `AuditHead` row locked `FOR UPDATE`, never from an auto-increment PK (Postgres sequences gap on rollback and would silently hole the chain). `audit.hashchain.verify_chain` recomputes the whole chain and pinpoints the first `seq` where an insert, delete, reorder, or edit breaks the linkage. So a judge who revises a ballot leaves **two** chained events — the prior scores survive in the earlier one — and any edit to a stored audit row is detectable. Since Increment 5 the prior scores *also* survive as their own immutable row: `record_ballot` appends a `BallotRevision` (`UNIQUE(ballot, version)`, DB `CHECK` scores 1..5) inside that same atomic block, keeping `Ballot.*` only as a denormalised latest-pointer, so ballot history is append-only and not merely evident in the chain.
 
-*Status.* SHIPPED (commit `edb35c8`) — hash-chained `audit_event` + singleton `AuditHead`, atomic co-commit with the business write, `verify_chain`, and the `audit_verify` / `audit_export` commands. Covered by `src/audit/tests.py` (6 DB-backed tests) and the offline verifier `audit/verify.py`.
+*Status.* SHIPPED (commit `edb35c8`) — hash-chained `audit_event` + singleton `AuditHead`, atomic co-commit with the business write, `verify_chain`, and the `audit_verify` / `audit_export` commands. Covered by `src/audit/tests.py` (6 DB-backed tests) and the offline verifier `audit/verify.py`. Append-only ballot history followed in Increment 5 (commit `d1c60fc`): the immutable `BallotRevision` table with a `CHECK 1..5` on both it and `Ballot`, covered by `src/judging/tests.py`.
 
-*Residual — what is NOT yet shipped (do not read more into this).* The **`Ballot` row itself is still mutable**: `record_ballot` uses `update_or_create`, so the *current* ballot state is overwritten in place. The audit log makes that overwrite **evident** (the old value survives in the earlier chained event), but the row is not yet append-only. A first-class `BallotRevision` history — `UNIQUE(ballot, version)` with a DB `CHECK 1..5` and readers pinned to the highest version — is the next build and is item 1 on the honest list (§9). Separately, an out-of-band edit made **directly in Postgres** (bypassing `record_ballot`) emits no event; it is caught only by comparing the live row against the audit log's last recorded value for that ballot — a manual reconciliation today, not an automated one.
+*Residual — what is NOT yet shipped (do not read more into this).* The append-only ballot history above closes the gap this section used to name (the `BallotRevision` history that was "the next build" now ships). The genuine residual is the **operator boundary** (A8): an out-of-band edit made **directly in Postgres** — bypassing `record_ballot` — writes no revision and emits no chained event, so it is caught only by comparing the live row against the audit log's last recorded value for that ballot, a manual reconciliation today rather than an automated one.
 
-*Verify.* `src/audit/models.py` (the two tables); `judging/services.py` `record_ballot` (the atomic `record_event` call — and the still-present `update_or_create`); `manage.py test audit`; `manage.py audit_verify`.
+*Verify.* `src/audit/models.py` (the two audit tables) and `src/judging/models.py` (`BallotRevision`, the two `CHECK`s); `judging/services.py` `record_ballot` (appends a `BallotRevision` **and** the atomic `record_event` in one block); `manage.py test audit judging`; `manage.py audit_verify`.
 
 ### A8 — Insider / operator tampering (adversary O) · prevention ACCEPTED RISK · detection SHIPPED-with-caveat
 
@@ -189,20 +191,18 @@ Every event-scoped view resolves "the current event" as the single event in the 
 
 The controls this build does **not** ship, stated plainly. This list is the point: a reviewer should trust the SHIPPED labels above precisely because these are not hidden among them.
 
-*Shipped since the first draft.* The append-only, hash-chained audit log — the previous top item here — is now built and tested (A7, A8; commit `edb35c8`), so it has left this list. What remains below is genuinely not in the build.
+*Shipped since the first draft.* Three items once on this list are now built and tested, so they have left it: the append-only, hash-chained **audit log** (A7, A8; commit `edb35c8`); **append-only ballot history** — the immutable `BallotRevision` table (A7; commit `d1c60fc`); and a **signed, reproducible normalization run** with an offline verifier (A6; `src/normalize/runs.py`, `src/normalize/verify.py`). What remains below is genuinely not in the build.
 
-1. **Ballot-row append-only immutability** — the audit log now *evidences* every ballot write (A7), but the `Ballot` row itself is still overwritten in place (`update_or_create`); a first-class `BallotRevision` history — `UNIQUE(ballot, version)`, DB `CHECK 1..5`, readers pinned to the highest version — is not yet built. DESIGN ONLY. *Next build.*
-2. **Rate-limit enforcement** — policy configured (`DOGFOOD_RATE_LIMITS`), no code consumes it. DESIGN ONLY.
-3. **Login throttling / lockout** — not implemented. DESIGN ONLY.
-4. **Collusion & residual-outlier detection** in judging — structural leverage limits exist, active detectors do not. DESIGN ONLY.
-5. **Signed, single-use invitations** — no invite flow; the organizer seeds accounts. DESIGN ONLY.
-6. **Submission revisions / withdrawal** — create-only; no revision history. DESIGN ONLY.
-7. **Persisted immutable normalization run** — the leaderboard recomputes live from ballots, so there is no stored, editable result (arguably cleaner), but also no signed, reproducible run record. DESIGN ONLY.
-8. **Community / public voting** — not built; it would need the online anti-sybil oracle §5 forbids. DECLINED.
-9. **Multi-event tenancy** — §8. DECLINED.
-10. **Operator-tampering prevention** — impossible in a self-hosted model; only detection is achievable, and it now ships as a signed, offline-verifiable audit chain (A8), bounded by the external-checkpoint caveat there. ACCEPTED RISK (prevention).
-11. **Demo-mode CSRF exemption** — accepted in the grader stack, off in production. ACCEPTED RISK.
-12. **Deadline-close TOCTOU** — sub-millisecond race, no row lock. ACCEPTED RISK.
+1. **Rate-limit enforcement** — policy configured (`DOGFOOD_RATE_LIMITS`), no code consumes it. DESIGN ONLY.
+2. **Login throttling / lockout** — not implemented. DESIGN ONLY.
+3. **Collusion & residual-outlier detection** in judging — structural leverage limits exist, active detectors do not. DESIGN ONLY.
+4. **Signed, single-use invitations** — no invite flow; the organizer seeds accounts. DESIGN ONLY.
+5. **Submission revisions / withdrawal** — create-only; no revision history. DESIGN ONLY.
+6. **Community / public voting** — not built; it would need the online anti-sybil oracle §5 forbids. DECLINED.
+7. **Multi-event tenancy** — §8. DECLINED.
+8. **Operator-tampering prevention** — impossible in a self-hosted model; only detection is achievable, and it now ships as a signed, offline-verifiable audit chain (A8), bounded by the external-checkpoint caveat there. ACCEPTED RISK (prevention).
+9. **Demo-mode CSRF exemption** — accepted in the grader stack, off in production. ACCEPTED RISK.
+10. **Deadline-close TOCTOU** — sub-millisecond race, no row lock. ACCEPTED RISK.
 
 ## 10. How to verify every "SHIPPED" claim
 
@@ -213,6 +213,8 @@ docker compose up --build --detach --wait
 docker compose exec -T web python -m pytest tests/ -q          # smoke, normalizer, export guard
 docker compose exec -T -w /app/src web python manage.py test   # DB-backed isolation, gate, and audit-chain tests
 docker compose exec -T -w /app/src web python manage.py audit_verify   # recompute the live audit chain in place
+docker compose exec -T -w /app/src web python manage.py normalize_publish --export /tmp/nbundle   # sign a reproducible run, then self-verify
+docker compose exec -T -w /app/src web python -m normalize.verify /tmp/nbundle             # re-run the estimator from pinned inputs, offline
 python3 tools/replay.py                                        # the 7 acceptance checks, no redirects
 ```
 
@@ -223,8 +225,9 @@ python3 tools/replay.py                                        # the 7 acceptanc
 | A3 server-side deadline | `replay.py` 3 |
 | A4 ownership (server-derived team, event-scoped track) | `submissions/services.py`, `submissions/views.py`; `replay.py` 3 |
 | A5 CSV formula-injection guard + cache headers | `tests/test_export_hardening.py`; `replay.py` 7 |
-| A6 estimator determinism & gauge | `tests/test_normalize_engine.py`; `manage.py test` |
+| A6 estimator determinism + signed reproducible run | `tests/test_normalize_engine.py`, `tests/test_normalize_signing.py`; `manage.py test`; `manage.py normalize_publish --export <dir>` + offline `python -m normalize.verify <dir>` |
 | A7/A8 tamper-evident audit chain + signed checkpoint | `src/audit/tests.py` (6, via `manage.py test audit`); `manage.py audit_verify`; `manage.py audit_export` + offline `audit/verify.py` |
+| A7 append-only ballot history | `src/judging/tests.py` (via `manage.py test judging`); `src/judging/models.py` `BallotRevision` |
 | CSP / middleware wired | `tests/test_smoke.py` |
 | No raw SQL, no upload surface | grep `\.raw(` / `request.FILES` → none |
 
