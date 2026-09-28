@@ -18,7 +18,7 @@ crux of checks 4/5/6.
 """
 from django.db import models
 
-from events.models import Event, EventMembership
+from events.models import Event, EventMembership, Team
 from submissions.models import Submission
 
 
@@ -119,3 +119,33 @@ class RubricWeight(models.Model):
 
     def __str__(self):
         return "%s=%s" % (self.criterion, self.weight)
+
+
+class JudgeRecusal(models.Model):
+    """An organizer-declared conflict of interest: a judge will NOT review a given team's
+    submissions. Distinct from the automatic own-team exclusion the auto-assignment planner already
+    applies (a judge is never assigned their own team's project, derived from TeamMember); this
+    records a COI with a team the judge is NOT a member of -- a former colleague, a mentor, a stake --
+    so the planner skips every one of that team's projects for that judge.
+
+    Team-level, not submission-level, on purpose: a conflict is with the people, so it must cover the
+    team's future submissions too, not only the ones filed when the recusal is created. The pure
+    planner (judging/assignment.py) consumes per-submission recusals; judging.services expands each
+    team recusal to that team's current submission ext_ids at plan time (judging/recusal.py). Removing
+    a recusal is an organizer action; like the assignment writes around it, it is non-destructive --
+    it changes only who MAY be planned, never any recorded ballot or its append-only history.
+    """
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="judge_recusals")
+    judge = models.ForeignKey(EventMembership, on_delete=models.CASCADE, related_name="recusals")
+    team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name="judge_recusals")
+    reason = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "judge_recusal"
+        constraints = [
+            models.UniqueConstraint(fields=["judge", "team"], name="uniq_judge_recusal"),
+        ]
+
+    def __str__(self):
+        return "recuse %s <> %s" % (self.judge_id, self.team_id)

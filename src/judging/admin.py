@@ -14,7 +14,7 @@ from django.contrib import admin
 
 from portal.admin_mixins import ReadOnlyModelAdmin
 
-from .models import Ballot, BallotRevision, JudgeAssignment, RubricWeight
+from .models import Ballot, BallotRevision, JudgeAssignment, JudgeRecusal, RubricWeight
 
 import math
 
@@ -83,3 +83,15 @@ class RubricWeightAdmin(admin.ModelAdmin):
     list_filter = ("event",)
     search_fields = ("criterion",)
     autocomplete_fields = ("event",)
+
+
+@admin.register(JudgeRecusal)
+class JudgeRecusalAdmin(admin.ModelAdmin):
+    """Organizer-managed conflicts of interest. Freely add/remove-able: a recusal changes only who
+    the auto-assignment planner MAY assign, never any recorded ballot, so -- unlike a scored
+    assignment -- it carries no append-only history to protect. raw_id_fields keep the judge/team
+    pickers scalable and avoid depending on another app's admin search configuration."""
+    list_display = ("event", "judge", "team", "reason", "created_at")
+    list_filter = ("event",)
+    search_fields = ("judge__user__email", "team__ext_id", "reason")
+    raw_id_fields = ("event", "judge", "team")

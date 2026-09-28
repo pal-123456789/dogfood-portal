@@ -20,7 +20,7 @@ from django.utils import timezone
 from audit.models import AuditEvent
 from events.models import Event, EventMembership, Team, Track
 from judging import services
-from judging.models import Ballot, BallotRevision, JudgeAssignment
+from judging.models import Ballot, BallotRevision, JudgeAssignment, JudgeRecusal
 from submissions.models import Submission
 
 User = get_user_model()
@@ -617,3 +617,55 @@ class AutoAssignViewTests(TestCase):
         self.client.force_login(self.outsider)                          # participant, not organizer
         self.assertEqual(self.client.get(self.url).status_code, 403)
         self.assertEqual(self.client.post(self.url, {"k": "2"}).status_code, 403)
+
+
+class AutoAssignRecusalTests(TestCase):
+    """#135 end to end at the DB/service layer: an organizer-declared JudgeRecusal(judge, team) is
+    read by judging.services._assignment_inputs, expanded to that team's submissions, and honored by
+    the connectivity-aware planner. The recused judge is never assigned to that team's projects,
+    other judges still cover them, and the recused judge still reviews OTHER teams -- proving the
+    JudgeRecusal query + judging.recusal.expand_recusals + planner wiring together, plus the DB
+    UNIQUE(judge, team) guard from migration 0004. (The expansion itself is also covered DB-free in
+    tests/test_recusal.py; this pins the database read the pure tests cannot.)"""
+
+    def setUp(self):
+        self.event = Event.objects.create(ext_id="evt_rc", name="RC", state=Event.CLOSED,
+                                           submissions_close=timezone.now() - timedelta(days=1))
+        self.trk = Track.objects.create(ext_id="trk_rc", event=self.event, name="Main")
+        self.team_a = Team.objects.create(ext_id="tm_ra", event=self.event, name="Alpha")
+        self.team_b = Team.objects.create(ext_id="tm_rb", event=self.event, name="Bravo")
+        self.a_subs = [Submission.objects.create(ext_id="prj_ra%d" % i, event=self.event,
+                                                 team=self.team_a, track=self.trk, title="A%d" % i,
+                                                 state=Submission.SUBMITTED) for i in range(1, 3)]
+        self.b_sub = Submission.objects.create(ext_id="prj_rb1", event=self.event, team=self.team_b,
+                                               track=self.trk, title="B1", state=Submission.SUBMITTED)
+        self.judges = {}
+        for n in (1, 2, 3):
+            u = User.objects.create_user(email="jr%d@x.com" % n, password="x")
+            self.judges[n] = EventMembership.objects.create(
+                user=u, event=self.event, role=EventMembership.JUDGE, ext_id="jdg_r%d" % n)
+        # jdg_r1 has a COI with team Alpha; jdg_r2 and jdg_r3 each with team Bravo. None of them is a
+        # MEMBER of either team, so the only thing barring them is the recusal (not the own-team rule).
+        JudgeRecusal.objects.create(event=self.event, judge=self.judges[1], team=self.team_a)
+        JudgeRecusal.objects.create(event=self.event, judge=self.judges[2], team=self.team_b)
+        JudgeRecusal.objects.create(event=self.event, judge=self.judges[3], team=self.team_b)
+
+    def test_planner_honors_db_recusals_both_ways(self):
+        plan, summary = services.preview_assignment_plan(self.event, k=1)
+        plan = set(plan)
+        # jdg_r1 is recused from Alpha -> never on Alpha's projects...
+        self.assertNotIn(("jdg_r1", "prj_ra1"), plan)
+        self.assertNotIn(("jdg_r1", "prj_ra2"), plan)
+        # ...but Bravo's only eligible judge is jdg_r1 (r2 and r3 are recused from Bravo), so to reach
+        # k=1 coverage the planner MUST assign Bravo's project to the judge recused from Alpha.
+        self.assertIn(("jdg_r1", "prj_rb1"), plan)
+        self.assertNotIn(("jdg_r2", "prj_rb1"), plan)
+        self.assertNotIn(("jdg_r3", "prj_rb1"), plan)
+        # every SUBMITTED project still reaches k=1 despite the conflicts of interest.
+        self.assertEqual(summary["covered_after"], 3)
+
+    def test_duplicate_recusal_is_refused_by_db(self):
+        # UNIQUE(judge, team) makes a recusal idempotent: filing the same pair twice is refused.
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                JudgeRecusal.objects.create(event=self.event, judge=self.judges[1], team=self.team_a)

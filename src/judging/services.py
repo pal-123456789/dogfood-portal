@@ -18,7 +18,8 @@ from audit import service as audit_service
 from submissions.models import Submission
 
 from . import assignment
-from .models import Ballot, BallotRevision, JudgeAssignment, RubricWeight
+from .models import Ballot, BallotRevision, JudgeAssignment, JudgeRecusal, RubricWeight
+from .recusal import expand_recusals
 
 SCORE_MIN, SCORE_MAX = 1, 5
 # Rubric criteria in engine.CRITERIA order. Declared here (not imported from normalize) so the
@@ -381,8 +382,11 @@ def _assignment_inputs(event):
         track in the event (the planner still enforces track-matching, tested with mixed tracks);
       * teams  -- a judge's conflict of interest: the teams in THIS event whose members include the
         judge's user, so the planner never assigns a judge to their own team's project;
-      * recused -- no recusal model exists here, so the empty set is passed (the planner supports an
-        explicit recusal set and is unit-tested for it).
+      * recused -- organizer-declared conflicts of interest: each JudgeRecusal (judge, team) is
+        expanded to that team's SUBMITTED submissions (judging/recusal.py) and fed as the judge's
+        recusal set, so the planner never assigns a recused judge to that team's projects. This is
+        ADDITIVE to the own-team `teams` exclusion above (it covers a COI with a team the judge is
+        not a member of).
     Only SUBMITTED projects are planned; drafts and withdrawn projects are not judged."""
     judges = event_judges(event)
     submissions = [s for s in event_submissions(event) if s.state == Submission.SUBMITTED]
@@ -399,7 +403,18 @@ def _assignment_inputs(event):
     coi_teams = {}     # user id -> {team ext_id} in this event
     for tm in TeamMember.objects.filter(team__event=event).select_related("team"):
         coi_teams.setdefault(tm.user_id, set()).add(tm.team.ext_id)
-    # PLANNER_APPEND
+    # Organizer-declared conflicts of interest (#135): each JudgeRecusal names a (judge, team) the
+    # judge must not review. A recusal is filed at TEAM granularity (the COI is with the people, so
+    # it must cover that team's future submissions too), while the planner works in submission
+    # ext_ids -- so expand each recusal to that team's currently-planned (SUBMITTED) submissions.
+    # ADDITIVE to the own-team exclusion in `teams` above: this covers a COI with a team the judge
+    # is NOT a member of. The expansion itself is pure/DB-free in judging/recusal.py.
+    team_subs = {}     # team ext_id -> [submission ext_id] among the submissions being planned
+    for s in submissions:
+        team_subs.setdefault(s.team.ext_id, []).append(s.ext_id)
+    recused_pairs = (JudgeRecusal.objects.filter(event=event)
+                     .values_list("judge__ext_id", "team__ext_id"))
+    recused_map = expand_recusals(recused_pairs, team_subs)   # {judge ext_id: {submission ext_id}}
     judges_in = []
     for m in judges:
         if not m.ext_id:
@@ -409,7 +424,7 @@ def _assignment_inputs(event):
             "tracks": track_ids,
             "teams": coi_teams.get(m.user_id, set()),
             "assigned": held.get(m.id, set()),
-            "recused": set(),
+            "recused": recused_map.get(m.ext_id, set()),
             "load": len(held.get(m.id, set())),
         })
     projects_in = [{
