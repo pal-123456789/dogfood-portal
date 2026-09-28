@@ -12,11 +12,12 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Max
 
-from events.models import EventMembership
+from events.models import EventMembership, TeamMember, Track
 
 from audit import service as audit_service
 from submissions.models import Submission
 
+from . import assignment
 from .models import Ballot, BallotRevision, JudgeAssignment, RubricWeight
 
 SCORE_MIN, SCORE_MAX = 1, 5
@@ -360,3 +361,87 @@ def set_rubric_weights(actor, event, *, weights):
             actor_user_id=getattr(actor, "pk", ""),
             payload={"event": event.ext_id, "old": old, "new": clean})
     return clean
+
+
+# --- Connectivity-aware auto-assignment (organizer-only) --------------------------------------
+# A preview/apply layer over the pure planner in judging/assignment.py. It reads the event's judges
+# and SUBMITTED projects into the plain dicts the planner consumes, and APPLIES a plan by calling
+# assign_judge once per edge -- so every planned assignment is created and audited on the exact same
+# path as a manual one (idempotent get_or_create + a single 'judge.assigned' event), never a new
+# write path. Model-free: the planner is pure and the writes reuse assign_judge, so no field or
+# migration is added and none of the five flat checker routes is touched.
+
+
+def _assignment_inputs(event):
+    """(judges, projects) as the plain dicts judging.assignment.plan_assignments consumes.
+
+    Only the eligibility this schema can express is derived here; the rest the pure planner supports
+    generally and is unit-tested for:
+      * tracks -- there is no per-judge track table in this schema, so every judge is offered every
+        track in the event (the planner still enforces track-matching, tested with mixed tracks);
+      * teams  -- a judge's conflict of interest: the teams in THIS event whose members include the
+        judge's user, so the planner never assigns a judge to their own team's project;
+      * recused -- no recusal model exists here, so the empty set is passed (the planner supports an
+        explicit recusal set and is unit-tested for it).
+    Only SUBMITTED projects are planned; drafts and withdrawn projects are not judged."""
+    judges = event_judges(event)
+    submissions = [s for s in event_submissions(event) if s.state == Submission.SUBMITTED]
+    track_ids = list(Track.objects.filter(event=event).values_list("ext_id", flat=True))
+    sub_ids = [s.id for s in submissions]
+    assigns = (JudgeAssignment.objects
+               .filter(submission_id__in=sub_ids)
+               .select_related("judge", "submission"))
+    held = {}          # judge membership id -> {submission ext_id}
+    reviewers = {}     # submission id -> {judge ext_id}
+    for a in assigns:
+        held.setdefault(a.judge_id, set()).add(a.submission.ext_id)
+        reviewers.setdefault(a.submission_id, set()).add(a.judge.ext_id or str(a.judge_id))
+    coi_teams = {}     # user id -> {team ext_id} in this event
+    for tm in TeamMember.objects.filter(team__event=event).select_related("team"):
+        coi_teams.setdefault(tm.user_id, set()).add(tm.team.ext_id)
+    # PLANNER_APPEND
+    judges_in = []
+    for m in judges:
+        if not m.ext_id:
+            continue          # assign_judge resolves judges by ext_id; skip a blank-ext_id judge
+        judges_in.append({
+            "ext_id": m.ext_id,
+            "tracks": track_ids,
+            "teams": coi_teams.get(m.user_id, set()),
+            "assigned": held.get(m.id, set()),
+            "recused": set(),
+            "load": len(held.get(m.id, set())),
+        })
+    projects_in = [{
+        "ext_id": s.ext_id,
+        "track": s.track.ext_id,
+        "team": s.team.ext_id,
+        "reviews": len(reviewers.get(s.id, set())),
+        "assigned_judges": reviewers.get(s.id, set()),
+    } for s in submissions]
+    return judges_in, projects_in
+
+
+def preview_assignment_plan(event, *, k, seed=0):
+    """The plan plus a DB-free summary (per-project coverage, per-judge load, component count) for
+    the organizer preview. Reads the event's judges/projects/assignments only; writes nothing."""
+    judges, projects = _assignment_inputs(event)
+    plan = assignment.plan_assignments(judges, projects, k, seed=seed)
+    summary = assignment.summarize_plan(judges, projects, plan, k, seed=seed)
+    return plan, summary
+
+
+def apply_assignment_plan(actor, event, *, k, seed=0):
+    """Compute the plan and APPLY it by calling assign_judge once per edge -- each its own atomic,
+    audited 'judge.assigned' write, identical to a manual assignment. Idempotent end to end: a
+    planned pair that already exists is a no-op (assign_judge's get_or_create), so re-running adds
+    nothing new. Returns (created, planned) counts."""
+    plan, _summary = preview_assignment_plan(event, k=k, seed=seed)
+    created = 0
+    for jext, pext in plan:
+        existed = JudgeAssignment.objects.filter(
+            judge__event=event, judge__ext_id=jext, submission__ext_id=pext).exists()
+        assign_judge(actor, event, judge_ext_id=jext, submission_ext_id=pext)
+        if not existed:
+            created += 1
+    return created, len(plan)

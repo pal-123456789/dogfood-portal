@@ -16,5 +16,6 @@ urlpatterns = [
     path("<str:ext_id>/assignments", views.assignments, name="assignments"),
     path("<str:ext_id>/assignments/add", views.assign, name="assign"),
     path("<str:ext_id>/assignments/remove", views.unassign, name="unassign"),
+    path("<str:ext_id>/auto-assign", views.auto_assign, name="auto_assign"),
     path("<str:ext_id>/rubric", views.rubric, name="rubric"),
 ]

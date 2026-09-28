@@ -241,3 +241,68 @@ def rubric(request, ext_id):
                   {"event": event, "weights": services.current_weights(event),
                    "criteria": services.CRITERIA,
                    "notice": _NOTICES.get(request.GET.get("ok", ""), ""), "error": ""})
+
+
+# Connectivity-aware auto-assignment (organizer-only). Preview + apply the plan computed by the pure
+# planner in judging/assignment.py. GET previews; POST applies via assign_judge (one audited write
+# per edge). Under the /judging/ include and NOT linked from base.html, so the five flat checker
+# routes stay byte-identical.
+_PLAN_K_DEFAULT, _PLAN_K_MAX = 3, 20
+
+
+def _plan_target_k(request):
+    """The per-project review target k from the form (?k= / POST k), clamped to 1.._PLAN_K_MAX."""
+    raw = request.POST.get("k") if request.method == "POST" else request.GET.get("k")
+    try:
+        return max(1, min(_PLAN_K_MAX, int(raw)))
+    except (TypeError, ValueError):
+        return _PLAN_K_DEFAULT
+
+
+def _auto_assign_context(event, k, plan, summary, **extra):
+    ctx = {"event": event, "k": k, "plan": plan, "summary": summary, "notice": "", "error": ""}
+    ctx.update(extra)
+    return ctx
+
+
+@require_http_methods(["GET", "POST"])
+def auto_assign(request, ext_id):
+    """Preview (GET) and apply (POST) a connectivity-aware auto-assignment plan for the event.
+
+    GET shows the plan judging.assignment.plan_assignments proposes: per-project coverage toward the
+    target k, per-judge load, and the resulting judge<->project component count (one component == the
+    whole field is connected). POST applies it through services.apply_assignment_plan, which calls
+    assign_judge once per edge -- each an atomic, audited 'judge.assigned' write, exactly like a
+    manual assignment -- then redirects back to the preview (PRG). Organizer-only and event-scoped,
+    like the rest of the control room.
+
+    A bulk organizer write, so POST is throttled per (event, organizer); the DEMO shim is EXEMPT
+    (mirrors score()/submit()) and the limiter fails open. The limit is read via .get(default), so
+    no settings key is required for the feature to run.
+    """
+    event, resp = _organizer_event_or_response(request, ext_id)
+    if resp is not None:
+        return resp
+    k = _plan_target_k(request)
+    if request.method == "POST":
+        if not getattr(request, "demo_shim", False):
+            allowed, retry = ratelimit.hit(
+                "assignment_write:%s:%s" % (event.ext_id, request.user.pk),
+                settings.DOGFOOD_RATE_LIMITS.get("assignment_write", "60/h"))
+            if not allowed:
+                plan, summary = services.preview_assignment_plan(event, k=k)
+                resp = render(request, "judging/auto_assign.html",
+                              _auto_assign_context(event, k, plan, summary,
+                                                   error="Too many auto-assign runs. Please slow down."),
+                              status=429)
+                resp["Retry-After"] = str(retry)
+                return resp
+        created, _total = services.apply_assignment_plan(request.user, event, k=k)
+        return redirect("%s?applied=%d&k=%d" % (
+            reverse("judging:auto_assign", args=[event.ext_id]), created, k))
+    plan, summary = services.preview_assignment_plan(event, k=k)
+    applied = request.GET.get("applied", "")
+    notice = ("Applied %s new assignment%s." % (applied, "" if applied == "1" else "s")
+              if applied.isdigit() else "")
+    return render(request, "judging/auto_assign.html",
+                  _auto_assign_context(event, k, plan, summary, notice=notice))

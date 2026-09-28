@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Auto-assign — {{ event.name }} — dogfood portal{% endblock %}
+{% block content %}
+<div class="lede">
+  <h1>Auto-assign judges</h1>
+  <p><code>{{ event.ext_id }}</code> · plan review assignments so every project reaches the target and the judge–project graph is fully connected. Applying calls the same audited assignment path as manual assignment.</p>
+</div>
+
+{% if error %}<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">{{ error }}</div>{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+
+<form class="stack" method="get" action="{% url 'judging:auto_assign' event.ext_id %}">
+  <label>Reviews per project (target k)
+    <input type="number" name="k" min="1" max="20" value="{{ k }}">
+  </label>
+  <button type="submit">Preview plan</button>
+</form>
+
+<div class="filters">
+  <span class="chip">{{ summary.n_new }} new assignment{{ summary.n_new|pluralize }}</span>
+  <span class="chip">{{ summary.covered_after }}/{{ summary.n_projects }} projects meet k={{ k }}</span>
+  <span class="chip{% if summary.connected %} on{% endif %}">{{ summary.components_after }} component{{ summary.components_after|pluralize }}{% if summary.connected %} · fully connected{% endif %}</span>
+  <span class="chip">judge load after: {{ summary.min_load_after }}–{{ summary.max_load_after }}</span>
+</div>
+
+{% if summary.n_new %}
+<form method="post" action="{% url 'judging:auto_assign' event.ext_id %}" style="margin:0 0 30px">
+  {% csrf_token %}
+  <input type="hidden" name="k" value="{{ k }}">
+  <button type="submit">Apply {{ summary.n_new }} assignment{{ summary.n_new|pluralize }}</button>
+</form>
+{% else %}
+<p class="empty">Nothing to add: every project already meets the target and the graph is a single component.</p>
+{% endif %}
+
+<h3>Per-project coverage</h3>
+{% if summary.projects %}
+<div class="grid">
+  {% for row in summary.projects %}
+  <div class="card">
+    <h3 class="mono">{{ row.ext_id }}</h3>
+    <div class="meta">
+      <span class="tag">{{ row.track }}</span>
+      <span class="tag">{% if row.meets_k %}meets k{% else %}under k{% endif %}</span>
+    </div>
+    <p class="sum" style="margin-top:10px">{{ row.before }} → {{ row.after }} review{{ row.after|pluralize }}{% if row.added %} <span class="mono">(+{{ row.added }})</span>{% endif %}</p>
+  </div>
+  {% endfor %}
+</div>
+{% else %}<p class="empty">No submitted projects to assign yet.</p>{% endif %}
+
+{% if plan %}
+<h3>Planned assignments</h3>
+<div class="filters">
+  {% for edge in plan %}<span class="chip"><span class="mono">{{ edge.0 }}</span> → <span class="mono">{{ edge.1 }}</span></span>{% endfor %}
+</div>
+{% endif %}
+
+<p style="margin-top:20px">
+  <a href="{% url 'judging:assignments' event.ext_id %}">← manage assignments</a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="{% url 'judging:progress' event.ext_id %}">judging progress →</a>
+</p>
+{% endblock %}

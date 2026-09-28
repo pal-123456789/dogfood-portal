@@ -48,5 +48,5 @@
 {% endif %}{% endfor %}
 {% else %}<p class="empty">No assignments yet.</p>{% endif %}
 
-<p style="margin-top:20px"><a href="{% url 'judging:progress' event.ext_id %}">← judging progress</a></p>
+<p style="margin-top:20px"><a href="{% url 'judging:auto_assign' event.ext_id %}">Auto-assign judges →</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="{% url 'judging:progress' event.ext_id %}">← judging progress</a></p>
 {% endblock %}

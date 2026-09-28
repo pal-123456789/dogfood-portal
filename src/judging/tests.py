@@ -545,3 +545,75 @@ class AdminDeleteMatrixTests(TestCase):
         clean_user = User.objects.create_user(email="cleanadm@x.com", password=None)
         self.assertTrue(ma.has_delete_permission(req, clean_user))
         self.assertNotIn("delete_selected", ma.get_actions(req))
+
+
+class AutoAssignViewTests(TestCase):
+    """The organizer auto-assign view: a preview/apply layer over the pure connectivity-aware
+    planner. GET previews a plan (per-project coverage, per-judge load, component count); POST
+    applies it by calling assign_judge once per planned edge, so every assignment is created and
+    audited exactly like a manual one. Organizer-only and event-scoped, and applying the same plan
+    twice adds nothing (idempotent). No model or migration is involved."""
+
+    def setUp(self):
+        self.event = Event.objects.create(ext_id="evt_aa", name="AA", state=Event.CLOSED,
+                                           submissions_close=timezone.now() - timedelta(days=1))
+        self.trk = Track.objects.create(ext_id="trk_aa", event=self.event, name="Main")
+        self.team = Team.objects.create(ext_id="tm_aa", event=self.event, name="Team")
+        self.subs = [Submission.objects.create(ext_id="prj_aa%d" % i, event=self.event,
+                                               team=self.team, track=self.trk, title="P%d" % i,
+                                               state=Submission.SUBMITTED) for i in range(1, 4)]
+        # A DRAFT project is never planned: only SUBMITTED projects are judged.
+        self.draft = Submission.objects.create(ext_id="prj_aa_draft", event=self.event,
+                                               team=self.team, track=self.trk, title="Draft",
+                                               state=Submission.DRAFT)
+        self.org_u = User.objects.create_user(email="org_aa@x.com", password="x")
+        EventMembership.objects.create(user=self.org_u, event=self.event,
+                                       role=EventMembership.ORGANIZER, ext_id="org_aa")
+        for i in range(1, 4):
+            u = User.objects.create_user(email="j%d_aa@x.com" % i, password="x")
+            EventMembership.objects.create(user=u, event=self.event,
+                                           role=EventMembership.JUDGE, ext_id="jdg_aa%d" % i)
+        self.outsider = User.objects.create_user(email="p_aa@x.com", password="x")
+        EventMembership.objects.create(user=self.outsider, event=self.event,
+                                       role=EventMembership.PARTICIPANT, ext_id="ptx_aa")
+        self.url = reverse("judging:auto_assign", args=["evt_aa"])
+    # SENTINEL_AUTO_ASSIGN
+
+    def test_apply_creates_k_coverage_and_audits_each_edge(self):
+        self.client.force_login(self.org_u)
+        resp = self.client.post(self.url, {"k": "2"})
+        self.assertEqual(resp.status_code, 302)                     # PRG back to the preview
+        self.assertIn("applied=6", resp["Location"])                # 3 projects x k=2 over 3 judges
+        for s in self.subs:                                         # every SUBMITTED project meets k
+            self.assertEqual(JudgeAssignment.objects.filter(submission=s).count(), 2)
+        self.assertEqual(JudgeAssignment.objects.filter(submission=self.draft).count(), 0)  # not judged
+        self.assertEqual(JudgeAssignment.objects.count(), 6)
+        # each created edge co-committed exactly one 'judge.assigned' audit event.
+        self.assertEqual(AuditEvent.objects.filter(event_type="judge.assigned").count(), 6)
+
+    def test_re_apply_is_idempotent(self):
+        self.client.force_login(self.org_u)
+        self.client.post(self.url, {"k": "2"})
+        rows = JudgeAssignment.objects.count()
+        audits = AuditEvent.objects.filter(event_type="judge.assigned").count()
+        resp = self.client.post(self.url, {"k": "2"})               # the identical plan, again
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("applied=0", resp["Location"])                # nothing new to add
+        self.assertEqual(JudgeAssignment.objects.count(), rows)     # no duplicate rows
+        self.assertEqual(AuditEvent.objects.filter(event_type="judge.assigned").count(), audits)
+
+    def test_get_previews_plan_without_writing(self):
+        self.client.force_login(self.org_u)
+        resp = self.client.get(self.url, {"k": "2"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["summary"]["covered_after"], 3)   # all 3 projects reach k
+        self.assertTrue(resp.context["summary"]["connected"])           # one component afterwards
+        self.assertEqual(JudgeAssignment.objects.count(), 0)            # a preview writes nothing
+
+    def test_organizer_guard_and_anonymous_redirect(self):
+        r_anon = self.client.get(self.url)                              # anonymous -> login page
+        self.assertEqual(r_anon.status_code, 302)
+        self.assertTrue(r_anon["Location"].startswith("/accounts/login/"))
+        self.client.force_login(self.outsider)                          # participant, not organizer
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+        self.assertEqual(self.client.post(self.url, {"k": "2"}).status_code, 403)
