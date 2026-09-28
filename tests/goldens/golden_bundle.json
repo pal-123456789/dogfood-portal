@@ -1,0 +1,186 @@
+{
+  "_format": "dogfood normalization-run bundle (run.json / inputs.json / result.json / public-key.pem) packed into one JSON; see tests/goldens/README.md",
+  "_generator": "tools/make_golden_bundle.py",
+  "inputs.json": {
+    "ballots": [
+      {
+        "functionality": 4,
+        "innovation": 4,
+        "judge": "jdg_h",
+        "quality": 4,
+        "submission": "prj_a",
+        "version": 1
+      },
+      {
+        "functionality": 5,
+        "innovation": 5,
+        "judge": "jdg_l",
+        "quality": 5,
+        "submission": "prj_a",
+        "version": 1
+      },
+      {
+        "functionality": 5,
+        "innovation": 5,
+        "judge": "jdg_m",
+        "quality": 4,
+        "submission": "prj_a",
+        "version": 1
+      },
+      {
+        "functionality": 3,
+        "innovation": 3,
+        "judge": "jdg_h",
+        "quality": 3,
+        "submission": "prj_b",
+        "version": 1
+      },
+      {
+        "functionality": 4,
+        "innovation": 4,
+        "judge": "jdg_l",
+        "quality": 4,
+        "submission": "prj_b",
+        "version": 1
+      },
+      {
+        "functionality": 4,
+        "innovation": 4,
+        "judge": "jdg_m",
+        "quality": 3,
+        "submission": "prj_b",
+        "version": 1
+      },
+      {
+        "functionality": 2,
+        "innovation": 2,
+        "judge": "jdg_h",
+        "quality": 2,
+        "submission": "prj_c",
+        "version": 1
+      },
+      {
+        "functionality": 3,
+        "innovation": 3,
+        "judge": "jdg_l",
+        "quality": 3,
+        "submission": "prj_c",
+        "version": 1
+      },
+      {
+        "functionality": 3,
+        "innovation": 3,
+        "judge": "jdg_m",
+        "quality": 2,
+        "submission": "prj_c",
+        "version": 1
+      }
+    ],
+    "criteria": [
+      "functionality",
+      "quality",
+      "innovation"
+    ],
+    "engine_version": "ridge-additive-v1",
+    "event_ext_id": "evt_golden",
+    "lambda": 1.0,
+    "n_boot": 200,
+    "seed": 0,
+    "submissions": [
+      {
+        "submission": "prj_a",
+        "title": "Alpha",
+        "track": "trk_01"
+      },
+      {
+        "submission": "prj_b",
+        "title": "Bravo",
+        "track": "trk_01"
+      },
+      {
+        "submission": "prj_c",
+        "title": "Cesium",
+        "track": "trk_01"
+      }
+    ],
+    "weights": {
+      "functionality": 1.0,
+      "innovation": 1.0,
+      "quality": 1.0
+    }
+  },
+  "public-key.pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=\n-----END PUBLIC KEY-----\n",
+  "result.json": {
+    "gauge_error": 5.551115123125783e-16,
+    "lambda": 1.0,
+    "n_ballots": 9,
+    "n_boot": 200,
+    "n_components": 1,
+    "n_judges": 3,
+    "n_submissions": 3,
+    "rows": [
+      {
+        "component": 0,
+        "delta": -0.0,
+        "n_ballots": 3,
+        "q": 4.5556,
+        "rank": 1,
+        "rank_hi": 1,
+        "rank_lo": 1,
+        "rank_median": 1,
+        "raw_mean": 4.5556,
+        "submission": "prj_a",
+        "tied_with_next": false,
+        "title": "Alpha",
+        "track": "trk_01"
+      },
+      {
+        "component": 0,
+        "delta": -0.0,
+        "n_ballots": 3,
+        "q": 3.5556,
+        "rank": 2,
+        "rank_hi": 2,
+        "rank_lo": 2,
+        "rank_median": 2,
+        "raw_mean": 3.5556,
+        "submission": "prj_b",
+        "tied_with_next": false,
+        "title": "Bravo",
+        "track": "trk_01"
+      },
+      {
+        "component": 0,
+        "delta": -0.0,
+        "n_ballots": 3,
+        "q": 2.5556,
+        "rank": 3,
+        "rank_hi": 3,
+        "rank_lo": 3,
+        "rank_median": 3,
+        "raw_mean": 2.5556,
+        "submission": "prj_c",
+        "tied_with_next": false,
+        "title": "Cesium",
+        "track": "trk_01"
+      }
+    ],
+    "sigma": 0.18,
+    "unresolved_count": 0
+  },
+  "run.json": {
+    "audit_seq": 1,
+    "created_at": "2026-01-01T00:00:00+00:00",
+    "engine_version": "ridge-additive-v1",
+    "event_ext_id": "evt_golden",
+    "fingerprint": "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+    "inputs_hash": "2b1dbc605814b62ea93c418ac6f72d0e5b57c89cabb9216e433bdf262d97fbb1",
+    "instance_id": "inst_golden_0001",
+    "lambda": 1.0,
+    "n_boot": 200,
+    "result_hash": "284979cfb412d8a7cd0aea8834dd3ddb7a37e67c45d85c42f08b80189b341089",
+    "run_ext_id": "nrun_golden_0000000000000001",
+    "seed": 0,
+    "signature": "6d5f4097276f72d77c6e6e3fa878d057464890a63de2bea1f05d2cd288c090b10ff3f9d8748b288227a0768e8d71c70a48db5c082e635f9fb05e2183e3a2060e"
+  }
+}
