@@ -40,13 +40,30 @@ def _gate(request):
     return event, None
 
 
+def _result_state(data):
+    """Map current_results() output to a governance-banner state for the public page:
+    official / provisional (published, by status), degraded (run missing), or unpublished."""
+    if not data.get("published"):
+        return "degraded" if data.get("detail") else "unpublished"
+    return "official" if data.get("status") == ResultPublication.FINAL else "provisional"
+
+
 def leaderboard(request):
     event, err = _gate(request)
     if err:
         msg, status = err
         return HttpResponse(msg, status=status, content_type="text/plain")
+    data = services.leaderboard(event)
+    # Live credibility reads (permutation consensus + per-rank SE): a recompute over CURRENT ballots,
+    # shown only on this organizer workbench and never presented as part of the signed/frozen result.
+    # n_boot is trimmed here (the SEs stay honest) so the organizer page renders snappily.
+    proof = services.proof_report(event, n_boot=400) if data.get("rows") else None
+    pub = results_svc.current_publication(event)
     return render(request, "normalize/leaderboard.html",
-                  {"event": event, "data": services.leaderboard(event)})
+                  {"event": event, "data": data, "proof": proof,
+                   "live_published": pub is not None,
+                   "live_status": pub.status if pub else "",
+                   "live_version": pub.version if pub else 0})
 
 
 def leaderboard_json(request):
@@ -64,7 +81,7 @@ def results(request):
         return HttpResponse("no event configured", status=404, content_type="text/plain")
     data = results_svc.current_results(event)
     return render(request, "normalize/results.html",
-                  {"event": event, "data": data,
+                  {"event": event, "data": data, "gov_state": _result_state(data),
                    "history": results_svc.publication_history(event)})
 
 

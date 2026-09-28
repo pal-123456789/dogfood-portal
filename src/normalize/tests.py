@@ -832,3 +832,65 @@ class WithdrawnStillCountsInScoringTests(TestCase):
         blob = "\n".join(",".join(str(c) for c in r) for r in export_event_rows(self.event))
         self.assertIn("prj_c", blob)
 
+
+class FinalizationGovernanceUITests(TestCase):
+    """#93 -- the live-vs-finalized distinction must be unmissable AND honest on the rendered pages.
+
+    The public results page and the organizer workbench share identical ranking-table markup, so the
+    governance banner -- not the prose -- is what keeps them apart. Two properties are load-bearing:
+    (1) the public page states its exact finalization status (official / provisional / not-published);
+    and (2) the LIVE credibility diagnostics (permutation consensus, per-rank SE) render ONLY on the
+    organizer workbench and NEVER on the frozen public page, where they would falsely appear to be
+    part of the signed result."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.event, cls.subs, cls.org = _seed_additive_event("gov")
+
+    def _key(self):
+        from audit import receipts
+        return receipts.generate_private_key()
+
+    def test_public_unpublished_shows_not_published_banner(self):
+        resp = Client().get("/normalize/results")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Not published")
+        self.assertContains(resp, "intentionally not public")
+        self.assertNotContains(resp, "Official</span>")   # no official BADGE before any publish
+
+    def test_public_final_publish_is_official_no_live_diagnostics(self):
+        results.publish_results(self.event, key=self._key(), status=ResultPublication.FINAL,
+                                n_boot=120, seed=0)
+        resp = Client().get("/normalize/results")
+        self.assertContains(resp, "Official</span>")
+        self.assertContains(resp, "signed, frozen")
+        self.assertContains(resp, "What this ranking is")
+        # Anti-mislead: the live credibility PANEL must NOT appear on the frozen public page.
+        # (The limitations note may *mention* live diagnostics to point readers to the workbench;
+        # what must be absent is the panel itself -- its heading and its live-recompute numbers.)
+        self.assertNotContains(resp, "Credibility")
+        self.assertNotContains(resp, "Recomputed from the current ballots")
+
+    def test_public_provisional_publish_shows_provisional_banner(self):
+        results.publish_results(self.event, key=self._key(),
+                                status=ResultPublication.PROVISIONAL, n_boot=120, seed=0)
+        resp = Client().get("/normalize/results")
+        self.assertContains(resp, "Provisional</span>")
+        self.assertContains(resp, "not yet final")
+    def test_organizer_workbench_shows_live_banner_and_credibility(self):
+        c = Client(); c.force_login(self.org)
+        resp = c.get("/normalize/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "not official")               # the LIVE banner
+        self.assertContains(resp, "Credibility")                # the live-diagnostics panel
+        self.assertContains(resp, "Recomputed from the current ballots")
+        self.assertContains(resp, "part of any signed")         # the honest caveat
+
+    def test_live_banner_notes_an_existing_publication(self):
+        results.publish_results(self.event, key=self._key(), status=ResultPublication.FINAL,
+                                n_boot=120, seed=0)
+        c = Client(); c.force_login(self.org)
+        resp = c.get("/normalize/")
+        self.assertContains(resp, "already published")
+        self.assertContains(resp, "v1")
+

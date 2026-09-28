@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Official results · {{ event.name }}{% endblock %}
 {% block content %}
+{% include "normalize/_gov_banner.html" with state=gov_state %}
 <style>
   table.lb{border-collapse:collapse;width:100%;margin:14px 0 32px;font-size:.92rem}
   table.lb th,table.lb td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left}
@@ -74,6 +75,22 @@ official ranking here once judging is complete; until then, rankings are not pub
 {% else %}
 <p class="notice">This published run contains no ranked projects.</p>
 {% endif %}
+
+<div class="prov">
+  <h2>What this ranking is — and isn't</h2>
+  <p style="margin:0 0 8px">Severity-adjusted quality (<b>q</b>) from a ridge / partial-pooling model:
+  each judge's tendency to score high or low is estimated and removed, so a project seen by harsher
+  judges is not penalised for it. Rank is by q.</p>
+  <p style="margin:0 0 8px">The <b>90% rank interval</b> is a bootstrap over ballots. When two
+  projects' intervals overlap, the data does not separate them — read that pair as a tie, not a
+  settled order.</p>
+  <p style="margin:0 0 8px">It ranks <b>the scores judges gave</b>. It does not measure merit beyond
+  those scores, and it does not detect collusion or fraud; robustness and coverage checks live in the
+  organizer diagnostics panel, not here.</p>
+  <p style="margin:0">Consensus strength and per-project error bars are <b>live diagnostics</b> shown
+  on the organizer workbench, not part of this signed artifact. This page is exactly the signed run:
+  re-run it from the signed inputs and it canonicalises to <code>result_hash</code>.</p>
+</div>
 
 {% if history|length > 1 %}
 <div class="hist">

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Normalized leaderboard · {{ event.name }}{% endblock %}
 {% block content %}
+{% include "normalize/_gov_banner.html" with state="live" live_published=live_published live_status=live_status live_version=live_version %}
 <style>
   table.lb{border-collapse:collapse;width:100%;margin:14px 0 40px;font-size:.92rem}
   table.lb th,table.lb td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left}
@@ -12,6 +13,15 @@
   .delta.up{color:var(--accent-ink)} .delta.dn{color:#b23a3a}
   .flag{font-size:.72rem;color:#8a5a00;background:#fbf0d8;border-radius:6px;padding:1px 7px;white-space:nowrap}
   .ci{color:var(--muted);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.85rem}
+  .cred{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:8px 0 32px;background:var(--panel,#fafafa)}
+  .cred h2{margin:0 0 4px;font-size:.9rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+  .cred .sub{margin:0 0 12px;font-size:.82rem;color:var(--muted)}
+  .cred .rows{display:grid;grid-template-columns:1fr;gap:10px}
+  .cred .row{display:grid;grid-template-columns:180px 1fr;gap:4px 16px;align-items:baseline}
+  .cred .row .lab{font-size:.8rem;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+  .cred .row .val{font-size:.9rem}
+  .cred .row .val b{font-family:ui-monospace,Menlo,Consolas,monospace}
+  @media(max-width:640px){.cred .row{grid-template-columns:1fr}}
 </style>
 <div class="lede">
   <h1>Normalized leaderboard</h1>
@@ -55,6 +65,35 @@ not resolve that order. Machine-readable: <a href="leaderboard.json">leaderboard
   {% endfor %}
   </tbody>
 </table>
+{% if proof %}
+<div class="cred">
+  <h2>Credibility — live diagnostics</h2>
+  <p class="sub">Recomputed from the current ballots every time this page loads. These numbers are
+  <b>not</b> part of any signed or published result — they describe this live view. Publishing freezes
+  the ranking; it does not freeze these reads.</p>
+  <div class="rows">
+    <div class="row"><span class="lab">Consensus</span><span class="val">
+      Separation std(q) = <b>{{ proof.signal_observed }}</b>; reshuffling scores within each judge
+      (the null that all projects are equal) reaches <b>{{ proof.signal_perm_p95 }}</b> at its 95th
+      percentile — one-sided p = <b>{{ proof.signal_p }}</b>.
+      {% if proof.signal_significant %}Below the pre-registered α: the separation is unlikely to be
+      judge noise alone.{% else %}At or above α: on this panel the judges don't strongly agree on an
+      ordering, so a large p is the honest read — treat close gaps as ties.{% endif %}</span></div>
+    <div class="row"><span class="lab">Per-project error</span><span class="val">
+      Bootstrap standard error of q is <b>{{ proof.q_se_median }}</b> typical, <b>{{ proof.q_se_max }}</b>
+      worst — read alongside the 90% rank intervals above.</span></div>
+    {% if proof.sigma_within_reduction %}
+    <div class="row"><span class="lab">Scatter removed</span><span class="val">
+      Removing judge severity shrinks within-project score scatter <b>{{ proof.sigma_within_reduction }}×</b>
+      (σ {{ proof.sigma_within_raw }} → {{ proof.sigma_within_model }}).</span></div>
+    {% endif %}
+    <div class="row"><span class="lab">Vs. raw order</span><span class="val">
+      Spearman(raw mean, normalized) = <b>{{ proof.spearman_raw_norm }}</b>;
+      <b>{{ proof.ranks_changed }}</b> of {{ proof.n_submissions }} positions differ from the raw-mean
+      order. Judge-severity spread across the panel: σ <b>{{ proof.raw_judge_spread }}</b>.</span></div>
+  </div>
+</div>
+{% endif %}
 {% else %}
 <p class="notice">No ballots recorded yet — the normalized leaderboard appears once judging begins.</p>
 {% endif %}

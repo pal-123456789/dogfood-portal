@@ -1,0 +1,52 @@
+{% comment %}
+Finalization-governance banner (P2/W1). Included by both the PUBLIC frozen results page and the
+ORGANIZER live workbench so the two can never be mistaken for one another. Expects `state`:
+  official     -- a signed FINAL run is published (public results.html)
+  provisional  -- a signed PROVISIONAL run is published (public results.html)
+  unpublished  -- nothing published yet (public results.html)
+  degraded     -- a publication row exists but its signed run is missing (public results.html)
+  live         -- organizer workbench, a live recompute (leaderboard.html); optional live_published,
+                  live_status, live_version describe any already-published official run.
+Inline <style> only -- CSP is script-src 'self', so no <script> here. No base.html change.
+{% endcomment %}
+<style>
+  .gov{border-radius:12px;padding:13px 16px;margin:0 0 18px;border:1px solid var(--line);
+       display:flex;gap:13px;align-items:flex-start;font-size:.9rem;line-height:1.5}
+  .gov .k{flex:0 0 auto;font-weight:800;letter-spacing:.04em;text-transform:uppercase;
+          font-size:.72rem;border-radius:6px;padding:4px 10px;white-space:nowrap}
+  .gov .msg{margin:0;color:var(--ink)} .gov .msg b{color:var(--ink)} .gov .msg a{color:var(--accent-ink)}
+  .gov.official{background:#dcf4e5;border-color:#a9e0bf}   .gov.official .k{background:#0a5a2a;color:#fff}
+  .gov.provisional{background:#fbf0d8;border-color:#ecd9a6} .gov.provisional .k{background:#8a5a00;color:#fff}
+  .gov.unpublished{background:#eef1f4;border-color:#dce1e6} .gov.unpublished .k{background:#5a6472;color:#fff}
+  .gov.degraded{background:#fbe4e4;border-color:#eec2c2}   .gov.degraded .k{background:#b23a3a;color:#fff}
+  .gov.live{background:#eaf0fb;border-color:#c4d5f0}       .gov.live .k{background:#274b8a;color:#fff}
+</style>
+{% if state == "official" %}
+<div class="gov official"><span class="k">Official</span>
+  <p class="msg">This is the <b>signed, frozen</b> ranking the organizer published as <b>final</b>.
+  It is served verbatim from the signed run — never a live recompute — so it reproduces offline to
+  <code>result_hash</code>. The organizer's live workbench can differ from this; only this page is
+  official.</p></div>
+{% elif state == "provisional" %}
+<div class="gov provisional"><span class="k">Provisional</span>
+  <p class="msg">These results are published as <b>provisional</b>. They are signed and reproducible,
+  but the organizer may still supersede them with a later final publish, which appends a new version
+  here. Treat the ordering as <b>not yet final</b>.</p></div>
+{% elif state == "degraded" %}
+<div class="gov degraded"><span class="k">Unavailable</span>
+  <p class="msg">A publication record exists, but its signed run could not be loaded, so no ranking is
+  shown. This is deliberate: a partial or altered result is never displayed in place of the signed
+  one.</p></div>
+{% elif state == "live" %}
+<div class="gov live"><span class="k">Live · not official</span>
+  <p class="msg">Organizer <b>workbench</b>: a live recompute from the current ballots, including any
+  just-entered or revised scores. It is <b>not</b> official and is not signed.
+  {% if live_published %}An official <b>v{{ live_version }}</b> ({{ live_status }}) is
+  already published — this live view can differ from it.{% else %}Nothing has been published yet.{% endif %}
+  Freeze and sign a version from the <a href="{% url 'normalize:results_publish' %}">results
+  console</a>.</p></div>
+{% else %}
+<div class="gov unpublished"><span class="k">Not published</span>
+  <p class="msg">No official ranking has been published for this event yet. Until the organizer
+  publishes, results are intentionally not public.</p></div>
+{% endif %}
