@@ -121,6 +121,7 @@ def proof_report(event, n_boot=1000, seed=0):
     if "prj_07" in idx and "prj_41" in idx:
         dup = {"raw_gap": round(abs(raw["prj_07"] - raw["prj_41"]), 4),
                "norm_gap": round(abs(q[idx["prj_07"]] - q[idx["prj_41"]]), 4)}
+    sig = engine.signal_test(y, jk, sk, lam=lam, seed=seed)
     return {
         "n_ballots": len(y), "n_submissions": len(subs), "n_judges": len(rep["b"]),
         "n_components": ncomp,
@@ -136,6 +137,14 @@ def proof_report(event, n_boot=1000, seed=0):
         "spearman_raw_norm": round(_spearman(q, raw_vec), 4),
         "ranks_changed": changed,
         "unresolved_count": len(rep["unresolved"]),
+        # Honest credibility layer -- display only, never fed back into q or the signed ranking:
+        # the no-signal permutation p-value and a typical/worst per-rank standard error.
+        "signal_p": sig["p_value"],
+        "signal_observed": sig["observed"],
+        "signal_perm_p95": sig["perm_p95"],
+        "signal_significant": sig["significant"],
+        "q_se_median": round(float(np.median(rep["q_se"])), 4),
+        "q_se_max": round(float(np.max(rep["q_se"])), 4),
         "duplicate": dup,
     }
 

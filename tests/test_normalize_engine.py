@@ -83,3 +83,72 @@ def test_judge_means_are_per_judge_composite_means():
     assert abs(float(np.std(list(m.values()), ddof=1)) - np.std([3.0, 4.0], ddof=1)) < 1e-12
     # and it groups independently of the submission axis raw_means uses
     assert set(E.raw_means(y, sk)) == {"s1", "s2", "s3"}
+
+
+# --- No-signal permutation test + per-rank SE (engine.signal_test / rank_report q_se) ---------
+# The honest-credibility layer: whether the fitted quality spread is distinguishable from judge
+# severity + noise. Seeded, so the p-values are exact and reproducible - never flaky.
+
+def _strong_signal():
+    """A clear additive signal: base 4/3/2 quality + judge severity + tiny noise."""
+    base = {"s_a": 4.0, "s_b": 3.0, "s_c": 2.0}
+    bias = [0.0, 1.0, -1.0, 0.5, -0.5]
+    rng = np.random.default_rng(1)
+    jk, sk, y = [], [], []
+    for n, bj in enumerate(bias):
+        for sid, v in base.items():
+            jk.append("j%d" % n); sk.append(sid)
+            y.append(v + bj + rng.normal(0, 0.15))
+    return y, jk, sk
+
+
+def _pure_noise():
+    """No submission signal at all: identical true quality, only judge level + noise."""
+    rng = np.random.default_rng(7)
+    jk, sk, y = [], [], []
+    for n, bj in enumerate([0.0, 1.0, -1.0, 0.5, -0.5, 2.0]):
+        for sid in ("s_a", "s_b", "s_c", "s_d"):
+            jk.append("j%d" % n); sk.append(sid)
+            y.append(3.0 + bj + rng.normal(0, 0.6))
+    return y, jk, sk
+
+
+def test_signal_test_flags_real_signal():
+    y, jk, sk = _strong_signal()
+    sig = E.signal_test(y, jk, sk, lam=1.0, n_perm=400, seed=0)
+    assert sig["significant"] is True
+    assert sig["p_value"] < 0.05
+    assert sig["observed"] > sig["perm_p95"]     # real spread exceeds the null's 95th pct
+
+
+def test_signal_test_passes_pure_noise():
+    y, jk, sk = _pure_noise()
+    sig = E.signal_test(y, jk, sk, lam=1.0, n_perm=400, seed=0)
+    assert sig["significant"] is False
+    assert sig["p_value"] > 0.05                 # a coin-flip fixture must not read as signal
+
+
+def test_signal_test_is_deterministic_and_pure():
+    y, jk, sk = _pure_noise()
+    before = list(y)
+    a = E.signal_test(y, jk, sk, lam=1.0, n_perm=300, seed=42)
+    b = E.signal_test(y, jk, sk, lam=1.0, n_perm=300, seed=42)
+    assert a == b                                # same seed -> identical result
+    assert list(y) == before                     # inputs never mutated
+
+
+def test_rank_report_exposes_per_submission_se():
+    y, jk, sk = _strong_signal()
+    rep = E.rank_report(y, jk, sk, lam=1.0, n_boot=400, seed=0)
+    assert len(rep["q_se"]) == len(rep["subs"])
+    assert np.all(rep["q_se"] >= 0) and np.all(np.isfinite(rep["q_se"]))
+
+
+def test_signal_layer_never_touches_the_signed_ranking():
+    # The official leaderboard order is unchanged, and the display-only credibility fields
+    # (q_se, signal_*) must NOT appear in the signed compute_leaderboard dict.
+    y, jk, sk = _strong_signal()
+    display = {"s_a": ("A", "t"), "s_b": ("B", "t"), "s_c": ("C", "t")}
+    lb = E.compute_leaderboard(y, jk, sk, display, n_boot=200, seed=0, lam=1.0)
+    assert [r["submission"] for r in lb["rows"]] == ["s_a", "s_b", "s_c"]
+    assert "q_se" not in lb and "signal_p" not in lb

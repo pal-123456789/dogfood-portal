@@ -45,6 +45,11 @@ LAMBDA_GRID = (0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0)
 UNRESOLVED_PROB = (0.10, 0.90)   # a pairwise win-prob inside this band is a coin-flip
 UNRESOLVED_GAP = 0.25            # ...or a quality gap smaller than this is not meaningful
 
+# Pre-registered significance level for the no-signal permutation test, fixed BEFORE seeing any
+# result -- exactly like UNRESOLVED_* above. A ranking whose p-value sits at or above this is one the
+# data cannot distinguish from judge severity + noise; the write-up must say so rather than rank anyway.
+SIGNAL_ALPHA = 0.05
+
 def composite(raw, weights):
     """Weighted mean of one ballot's criteria -> a single 0..5 score.
 
@@ -246,14 +251,81 @@ def rank_report(y, judge_keys, sub_keys, lam=None, n_boot=1000, seed=0):
     win = np.empty((len(subs), len(subs)))
     for a in range(len(subs)):
         win[a] = (qmat[:, a][:, None] > qmat).mean(axis=0)
+    # Per-submission standard error of q, read straight off the SAME bootstrap draws the rank
+    # intervals use -- an honest +/- on every quality point at zero extra cost. Display-only: it is
+    # NOT part of the signed projection (canonical_result hashes compute_leaderboard's dict, which
+    # never carries q_se), so surfacing it cannot move a published result_hash.
+    q_se = qmat.std(axis=0, ddof=1)
     return {
         "lambda": lam, "lambda_table": table, "sigma": sigma,
-        "subs": subs, "q": q_point, "b": b,
+        "subs": subs, "q": q_point, "b": b, "q_se": q_se,
         "rank_median": np.median(ranks, axis=0),
         "rank_lo": np.percentile(ranks, 5, axis=0),
         "rank_hi": np.percentile(ranks, 95, axis=0),
         "win_prob": win, "n_boot": n_boot,
         "unresolved": _unresolved_pairs(subs, q_point, win),
+    }
+
+
+def signal_test(y, judge_keys, sub_keys, lam=None, n_perm=1000, seed=0):
+    """Is the spread of fitted quality real, or could judge severity + noise alone produce it?
+
+    The one question a ranking cannot answer about itself: is there ANY cross-judge consensus about
+    which submissions are better? The statistic is std(q) across submissions -- how far the additive
+    fit separates them AFTER removing judge severity.
+
+    THE NULL AND THE PERMUTATION
+        H0: submissions are equal; every difference in the ballots is judge level + noise. To draw
+        from H0 we shuffle, WITHIN each judge, which of that judge's submissions got which of that
+        judge's scores. That holds two things exactly -- each judge's own score multiset (their
+        severity and how much of the 1..5 range they use) and the judge<->submission graph (every
+        (judge, submission) edge survives, so the components and the pinned lambda still apply) --
+        and destroys only what H0 says is absent: agreement ACROSS judges on the same submissions.
+        A within-judge shuffle (not a global one) is what makes this a test of consensus rather than
+        of judge spread, which we already report separately as raw_judge_spread.
+
+    RETURNS observed std(q), the permutation mean and 95th percentile, and a one-sided Monte-Carlo
+        p-value (#{perm >= observed} + 1)/(n_perm + 1) -- the +1 counts the observed arrangement so
+        the p-value is valid and never 0. `significant` compares it to pre-registered SIGNAL_ALPHA.
+
+    Seeded (reproduces exactly), DB-free, and OFF the signed projection: a credibility read for the
+    write-up and organizer panel, never an input to q or the published ranking (compute_leaderboard
+    does not call it). On a low-signal panel a large p-value is the correct, honest answer.
+    """
+    y = np.asarray(y, dtype=float)
+    jk, sk = list(judge_keys), list(sub_keys)
+    if lam is None:
+        lam, _ = select_lambda(y, jk, sk, seed=seed)
+    q0, _ = fit(y, jk, sk, lam)
+    subs = sorted(q0)
+    observed = float(np.std([q0[s] for s in subs]))
+    by_judge = {}
+    for k, j in enumerate(jk):
+        by_judge.setdefault(j, []).append(k)
+    rng = np.random.default_rng(seed)
+    perm = np.empty(n_perm)
+    ge = 0
+    for p in range(n_perm):
+        ystar = y.copy()
+        for j in sorted(by_judge):                       # sorted -> RNG stream is order-stable
+            idx = by_judge[j]
+            ystar[idx] = rng.permutation(y[idx])
+        qp, _ = fit(ystar, jk, sk, lam)
+        sp = float(np.std([qp[s] for s in subs]))
+        perm[p] = sp
+        if sp >= observed - 1e-12:
+            ge += 1
+    p_value = (ge + 1) / (n_perm + 1)
+    return {
+        "statistic": "std(q) across submissions",
+        "observed": round(observed, 6),
+        "perm_mean": round(float(perm.mean()), 6),
+        "perm_p95": round(float(np.percentile(perm, 95)), 6),
+        "n_perm": n_perm,
+        "p_value": round(p_value, 4),
+        "alpha": SIGNAL_ALPHA,
+        "significant": bool(p_value < SIGNAL_ALPHA),
+        "lambda": float(lam),
     }
 
 
