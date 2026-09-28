@@ -28,7 +28,10 @@ Two project middlewares are registered (`src/portal/middleware.py`):
   `request.user` to the seeded user, sets `request._dont_enforce_csrf_checks = True`, and marks
   `request.demo_shim = True`. A no-op when the flag is off or the cookie is absent/unknown.
 - **`ContentSecurityPolicyMiddleware`** — sets `Content-Security-Policy: script-src 'self'` on every
-  response (via `setdefault`, so a view may override it).
+  response (via `setdefault`, so a view may override it). The one view that does is the Swagger docs
+  page (`/api/v1/docs/`), which sets `script-src 'self' 'unsafe-inline'` **scoped to that page** for
+  the UI's inline bootstrap `<script>`; the site-wide policy is unchanged (`src/api/views.py`
+  `CspSwaggerView`).
 
 Writes go through a **service layer**, not the views. `submissions.services.create_submission` runs
 auth → participant → deadline → validation and writes the `Submission` plus an audit event in one
@@ -73,6 +76,9 @@ URL but not linked from `base.html`.
 | GET        | `/normalize/results`, `/normalize/results.json` | `normalize.views` | **public** (frozen signed result) |
 | POST       | `/normalize/results/publish`  | `normalize.views`           | organizer |
 | GET        | `/normalize/diagnostics`, `.json` | `normalize.views`       | organizer |
+| GET        | `/api/v1/events/`, `/api/v1/events/<ext_id>/` | `api.views`         | **public**, read-only; event metadata only (no memberships / PII) |
+| GET        | `/api/v1/events/<ext_id>/{tracks,teams,submissions,results}/` | `api.views` | **public**, read-only; submissions are **SUBMITTED-only**; results are the frozen signed run or `{"published": false}` |
+| GET        | `/api/v1/schema/`, `/api/v1/docs/` | `drf_spectacular` views     | **public**; OpenAPI 3 schema + self-hosted Swagger UI |
 
 Access control is **event-scoped**: roles come from the `EventMembership` table
 (`organizer` / `judge` / `participant`), never from global user flags. `judge_scores`,
@@ -83,9 +89,9 @@ the exception to that resolution — it addresses the event by `ext_id` in the p
 **organizer** `EventMembership` in *that* event (`_organizer_event_or_response`: anonymous → login,
 unknown event → 404, non-organizer → 403), mirroring the events organizer UI.
 
-## The eight code units
+## The nine code units
 
-Seven domain apps plus the `portal` config package (`INSTALLED_APPS`):
+Eight apps plus the `portal` config package (`INSTALLED_APPS`):
 
 | App           | Responsibility | Models? | HTTP routes? |
 |---------------|----------------|---------|--------------|
@@ -97,6 +103,7 @@ Seven domain apps plus the `portal` config package (`INSTALLED_APPS`):
 | `judging`     | assignments, ballots, revisions, rubric weights, scores read + CSV export + in-app scoring | yes | `judge_scores`, `export_csv` (flat), `score` + organizer control room (`progress` / `assignments` / `rubric`, all `/judging/`) |
 | `normalize`   | score-normalization engine, signed runs, publication, diagnostics | yes | `/normalize/` |
 | `gallery`     | public project listing + `whoami` | no | flat routes |
+| `api`         | read-only public REST API (`/api/v1/`) + OpenAPI 3 schema / Swagger docs | no (no models, no migrations) | `/api/v1/` |
 
 ## Auth: DEMO shim vs real login
 
@@ -173,6 +180,35 @@ A fixed-window limiter over the shared `DatabaseCache` (`src/portal/ratelimit.py
 | `ballot_write`     | `120/h` | **yes** (DEMO shim exempt) | `src/judging/views.py` (`score`) |
 | `invite_redeem`    | `20/h`  | **yes** (DEMO shim exempt) | `src/events/views.py` (`redeem`) |
 
+## Read-only public API (`/api/v1/`)
+
+A versioned, **read-only** JSON API over the data that is already public, served by Django REST
+Framework and documented by an OpenAPI 3 schema. It is `GET`-only **by construction** — the views are
+`ListAPIView` / `RetrieveAPIView` / `APIView.get`, so there is no write path — and configured
+`AllowAny` with no authentication classes, so it exposes no logged-in user's data
+(`src/portal/settings.py` `REST_FRAMEWORK`). What it serves:
+
+- `events/` and `events/<ext_id>/` — public event metadata only (memberships are a reverse relation
+  and are never serialized);
+- `events/<ext_id>/tracks/`, `/teams/` — track and team **names**, event-scoped (team *members* and
+  their emails are never serialized);
+- `events/<ext_id>/submissions/` — **SUBMITTED submissions only**; drafts and withdrawn projects are
+  filtered out in the queryset;
+- `events/<ext_id>/results/` — the official published ranking read **verbatim from the frozen, signed
+  normalization run** (never a live recompute), or `{"published": false}` before an organizer
+  publishes;
+- `schema/` and `docs/` — the OpenAPI 3 schema and a self-hosted (no-CDN) Swagger UI.
+
+Each serializer declares its fields as an explicit allowlist (never `fields = "__all__"`), so no
+per-judge score, ballot, judge identity, invitation, audit row, or user PII (email / display name) can
+appear — a property `tests/test_api_contract.py` asserts without a database. Event-scoped collections
+are **nested** under `events/<ext_id>/`, so scoping is structural rather than a queryset convention.
+Every list is `PageNumberPagination`-bounded (`PAGE_SIZE = 50`) and the API is anon-throttled by a
+**fail-open** throttle (`src/api/throttling.py`; default `240/min`, `DOGFOOD_RATE_API`), so it never
+becomes an unbounded amplifier or a hard availability dependency. Mounted after the five flat checker
+routes and unlinked from `base.html`, so `tools/replay.py` stays 7/7 (`src/api/*`,
+`src/portal/urls.py`).
+
 ## Deployment topology
 
 `docker-compose.yml`:
@@ -188,7 +224,12 @@ The image build is itself a gate: the `Dockerfile` runs `manage.py check --fail-
 `manage.py makemigrations --check` at build time, so a model that disagrees with its (hand-authored)
 migration, or an unresolved import, fails the build. CI (`.github/workflows/ci.yml`) builds the
 image, runs the containerized `pytest tests/` suite against a real PostgreSQL service, and then
-restarts the `web` container to prove a second boot is idempotent.
+restarts the `web` container to exercise a second, idempotent boot. That suite includes a
+network-free release-bundle regression (`tests/test_verifier_golden.py`): it re-verifies a committed
+signed bundle and asserts that a one-byte tamper is rejected. It **module-skips until the golden bytes
+are committed** (`tests/goldens/golden_bundle.json`, generated on a dev machine by
+`tools/make_golden_bundle.py` and never regenerated in CI), so it guards the offline verifier only
+once that fixture is present.
 
 ## Implemented vs planned
 
@@ -216,6 +257,8 @@ means the model/service may exist but no endpoint wires it yet.
 | **Submission edit / withdraw** | **Shipped** — a team revises or **soft-withdraws** its own submission while the event is accepting writes (owner-gated, deadline-gated, atomic + audited); withdrawal flips state to `withdrawn` and hides it from the gallery but never deletes the row, so ballot/audit history survives | `src/submissions/{views,services,urls}.py`, `migrations/0002`, `templates/submissions/{mine,edit}.html`, `GET /submissions/mine`, `GET/POST /submissions/<id>/edit`, `POST /submissions/<id>/withdraw` |
 | **Single-use invitations** | **Shipped** — an organizer mints a signed, single-use invite; redeeming it is Ed25519-verified, single-use (DB-enforced under `select_for_update`), rate-limited, and atomically creates an `EventMembership` + `invite.redeemed` audit event. Roles are limited to judge/participant, so a link can never escalate to organizer | `src/events/{models,invite_signing,services,views,urls}.py`, `migrations/0002_invite`, `templates/events/{detail,redeem}.html`, `manage.py invite_verify`; `GET`/`POST` `/events/invite/<ext_id>` |
 | **App models in Django admin** | **Shipped** — all 18 models registered; append-only/signed tables (audit, ballots, revisions, runs, publications) are inspect-only, the signed `Invite` table is likewise inspect-only with adding disabled (delete-to-revoke an un-redeemed link is still allowed), and any row whose cascade would reach a **scored** assignment (the assignment itself, or a parent `Event`/`EventMembership`/`Submission`/`Team`/`AppUser`) refuses deletion so ballot history can't be destroyed through the admin UI (raw-DB access is the A8 operator boundary) | `src/*/admin.py`, `src/portal/admin_mixins.py` |
+| **Read-only public API** (`GET /api/v1/*`) + OpenAPI 3 / Swagger | **Shipped** — unauthenticated, `GET`-only; events, tracks, teams, **SUBMITTED** submissions, and the **frozen signed** results (or `{"published": false}`); explicit-allowlist serializers (no ballots / per-judge scores / judge identity / invites / audit chain / PII), page-bounded + fail-open throttled | `src/api/*`, `src/portal/urls.py`, `tests/test_api_contract.py` |
+| **Offline release-bundle regression test** | *Present but inert until seeded* — re-verifies a committed signed bundle and asserts a one-byte tamper is rejected; **module-skips until `tests/goldens/golden_bundle.json` is committed** | `tests/test_verifier_golden.py`, `tools/make_golden_bundle.py` |
 | **Multi-event support** | *Limitation by design* — uses the first event | `src/*/views.py` (`_current_event`) |
 
 

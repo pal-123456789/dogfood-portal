@@ -129,6 +129,21 @@ cannot be tuned to flatter a conclusion. The leaderboard surfaces this directly:
 project's rank interval and flags every unresolved adjacent pair, so an organizer reads "these
 two are a tie the data can't break," not a false podium.
 
+A complementary check asks the one question a point ranking cannot ask of itself: is the spread of
+fitted quality **consensus**, or could judge severity plus noise alone produce it? `signal_test`
+(`src/normalize/engine.py`) takes `std(q)` across submissions as its statistic and builds the null by
+permuting, **within each judge**, which of that judge's submissions received which of that judge's
+scores — holding every judge's own severity, score-use, and the judge↔submission graph fixed, and
+destroying only cross-judge agreement. It returns a one-sided Monte-Carlo p-value against a
+significance level fixed **before** any result (`SIGNAL_ALPHA = 0.05`, exactly like the unresolved
+band above), and is emitted in the `normalize_report --json` dict (`signal_p`, `signal_significant`).
+It is **display-only — never fed back into `q` or the signed ranking** (`compute_leaderboard` does not
+call it). The test is built to *withhold* a verdict rather than manufacture one: when the data cannot
+distinguish the observed spread from severity plus noise, a large p-value is the correct, honest
+output. The same `--json` report also carries a per-submission standard error on fitted quality
+(`q_se`, summarized as `q_se_median` / `q_se_max`), so each `q` comes with its own dispersion, not only
+through the pairwise band.
+
 ## Duplicate consistency control
 
 The fixture plants two identical submissions — prj_07 and prj_41 are the same team (tm_07),

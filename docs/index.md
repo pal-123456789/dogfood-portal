@@ -28,8 +28,8 @@ written to be checkable line-by-line against `src/`.
 - **Organizer control room** — an organizer manages judge assignments, sets rubric weights, and
   watches judging-progress coverage under `/judging/<event>/…`; assignment and rubric writes are
   atomic and audited (`judge.assigned` / `judge.unassigned` / `rubric.reweighted`), and a **scored**
-  assignment cannot be unassigned because its ballot history is append-only
-  (`src/judging/{views,services}.py`).
+  assignment cannot be unassigned through the console or admin, because its ballot history is
+  append-only (`src/judging/{views,services}.py`).
 - **Signed single-use invitations** — an organizer mints a signed link inviting one person to join
   as a judge or participant (`POST /events/<event>/invites/new`); redeeming it
   (`GET/POST /events/invite/<ext_id>`) is Ed25519-verified, single-use (enforced in the database),
@@ -41,6 +41,12 @@ written to be checkable line-by-line against `src/`.
 - **Normalized results** — organizers see an embargoed leaderboard and score diagnostics; the
   public sees only the frozen, signed result once published (`/normalize/…`,
   `src/normalize/views.py`).
+- **Read-only public API** — a versioned, read-only REST API at `/api/v1/` serves public event,
+  track, team, and **submitted** project data as JSON, plus the official **frozen, signed** results
+  once published, with an OpenAPI 3 schema (`/api/v1/schema/`) and a self-hosted Swagger UI
+  (`/api/v1/docs/`). It is unauthenticated and `GET`-only by construction — there are no write
+  endpoints — and never exposes ballots, per-judge scores, judge identities, invitations, the audit
+  chain, or user PII (`src/api/{views,serializers,urls}.py`).
 - **Real login / logout** with per-IP rate limiting, for humans self-hosting the portal
   (`/accounts/login/`, `/accounts/logout/`, `src/accounts/views.py`).
 - **Offline integrity verification** — the audit log, the normalization run, and a combined
@@ -97,7 +103,7 @@ Their honest scope — what a PASS does and does not bind — is documented in
 
 ## Documentation
 
-- **[Architecture](ARCHITECTURE.md)** — request lifecycle, the eight code units, the DEMO-vs-real
+- **[Architecture](ARCHITECTURE.md)** — request lifecycle, the nine code units, the DEMO-vs-real
   auth split, the integrity spine, rate limiting, deployment topology, and an explicit
   implemented-vs-planned table.
 - **[Data model](DATA-MODEL.md)** — every shipped model, its fields, constraints, and

@@ -1,6 +1,6 @@
 # Data model
 
-Eighteen models across six domain apps (`gallery` and `portal` define no models). Every migration
+Eighteen models across six domain apps (`gallery`, `api`, and `portal` define no models). Every migration
 is **hand-authored** to match its models, and the image build runs `manage.py makemigrations
 --check`, so a model and its migration cannot silently drift. There are **no composite foreign keys,
 no database triggers, no `RunSQL` DDL, and no `citext`** anywhere — every constraint below is an
@@ -143,8 +143,9 @@ any ballot and audit history beneath it stays intact.
 `judge` FK -> `EventMembership`; `submission` FK -> `Submission`. Constraint `uniq_judge_submission`
 = `UniqueConstraint(judge, submission)`. `judge_scores` reads only the caller's own assignments. An
 organizer manages assignments in-app at `/judging/<event>/assignments` (`assign_judge` /
-`unassign_judge`, atomic + audited); a **scored** assignment cannot be removed, because its `Ballot`
-→ `BallotRevision` history cascades off it.
+`unassign_judge`, atomic + audited); a **scored** assignment cannot be removed through the app or
+admin, because its `Ballot` → `BallotRevision` history cascades off it (raw-DB access is the A8
+operator boundary).
 
 ### `Ballot` — table `ballot` — live (read + write) / seed
 `assignment` OneToOne -> `JudgeAssignment`; `functionality`, `quality`, `innovation`
