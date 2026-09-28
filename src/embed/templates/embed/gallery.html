@@ -1,0 +1,66 @@
+{% comment %}
+Standalone framed widget document -- intentionally does NOT extend base.html.
+Own inline <style> only; NO inline <script> (keeps script-src 'self' honest).
+No PII: team name + project title / track / summary only.
+{% endcomment %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ event.name }} - projects</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #ffffff;
+    color: #1a1a2e;
+  }
+  header { margin-bottom: 14px; }
+  h1 { font-size: 1.1rem; margin: 0 0 2px; }
+  .sub { margin: 0; font-size: 0.78rem; color: #6b6b78; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li {
+    border: 1px solid #e6e6ef;
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+  }
+  .title { margin: 0 0 5px; font-weight: 600; font-size: 0.95rem; }
+  .meta { margin: 0 0 6px; font-size: 0.75rem; color: #555; }
+  .track-tag {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: #eef0ff;
+    color: #3a3af0;
+    font-size: 0.7rem;
+  }
+  .summary { margin: 0; font-size: 0.83rem; line-height: 1.45; color: #333; }
+  .empty { color: #8a8a96; font-size: 0.85rem; }
+  footer { margin-top: 14px; font-size: 0.7rem; color: #9a9aa6; }
+</style>
+</head>
+<body>
+<header>
+  <h1>{{ event.name }}</h1>
+  <p class="sub">Submitted projects</p>
+</header>
+{% if submissions %}
+<ul>
+  {% for s in submissions %}
+  <li>
+    <p class="title">{{ s.title }}</p>
+    <p class="meta"><span class="track-tag">{{ s.track.name }}</span> &middot; {{ s.team.name }}</p>
+    {% if s.summary %}<p class="summary">{{ s.summary }}</p>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty">No submitted projects yet.</p>
+{% endif %}
+<footer>Embedded gallery</footer>
+</body>
+</html>

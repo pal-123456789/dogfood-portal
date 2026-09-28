@@ -7,6 +7,10 @@ from gallery import views as gallery_views
 from judging import views as judging_views
 from submissions import views as submission_views
 
+# Model-free feature views wired at top-level paths below (see the T3/T4 block).
+from embed import views as embed_views
+from records import views as records_views
+
 urlpatterns = [
     path("healthz", lambda r: HttpResponse("ok", content_type="text/plain")),
 
@@ -31,4 +35,24 @@ urlpatterns = [
     # `api/v1/` prefix cannot shadow the flat `api/judge/scores` / `api/export.csv` routes, which
     # are matched earlier and require different path segments.
     path("api/v1/", include("api.urls")),
+
+    # T3/T4 feature routes. All additive and declared AFTER the five flat checker routes and the
+    # api/v1/ include, and none is linked from base.html, so byte-replay of the checker surface
+    # stays 7/7. `voting/`, `comments/`, `records/` are app-prefixed includes; the three bare
+    # paths are wired top-level by contract -- `.well-known/dogfood-signing-key` is a well-known
+    # location and `embed.js` / `embed/<ext_id>` are the entry points a third-party page loads.
+    # None can shadow an earlier route: each needs a distinct leading segment.
+    path("voting/", include("voting.urls")),
+    path("comments/", include("comments.urls")),
+    path("records/", include("records.urls")),
+    path(".well-known/dogfood-signing-key", records_views.signing_key),
+    path("embed.js", embed_views.embed_js),
+    path("embed/<str:ext_id>", embed_views.embed_gallery),
+
+    # Wave-2 T4 operability routes. Additive, declared AFTER the five flat checker routes and the
+    # api/v1/ include, and neither is linked from base.html, so byte-replay of the checker surface
+    # stays 7/7. Both are app-prefixed includes (`bundles/`, `webhooks/`), each with a distinct
+    # leading segment, so neither can shadow an earlier route.
+    path("bundles/", include("bundles.urls")),
+    path("webhooks/", include("webhooks.urls")),
 ]

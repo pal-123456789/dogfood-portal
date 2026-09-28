@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Your ballot · {{ event.name }}{% endblock %}
+{% block content %}
+<style>
+  table.vb{border-collapse:collapse;width:100%;margin:14px 0 22px;font-size:.94rem}
+  table.vb th,table.vb td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left}
+  table.vb th{color:var(--muted);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.03em}
+  table.vb td.v{width:110px}
+  table.vb input{width:90px}
+  .vsum{color:var(--muted);font-size:.88rem}
+</style>
+<div class="lede">
+  <h1>Community ballot</h1>
+  <p>Spread up to <b>{{ budget }}</b> credits across the projects below. Casting again replaces your
+     previous ballot. Cost is quadratic: N votes on one project costs N&sup2; credits (so 5 votes on
+     one project spends the whole 25-credit budget).</p>
+</div>
+
+{% if error %}<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">{{ error }}</div>{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+{% if not open %}<div class="notice">Voting is not open right now. You can review the ballot, but casts are refused outside the voting window.</div>{% endif %}
+
+{% if rows %}
+<form class="stack" method="post" action="{% url 'voting:ballot' event.ext_id %}" style="max-width:640px">
+  {% csrf_token %}
+  <table class="vb">
+    <thead><tr><th>Project</th><th>Track</th><th class="v">Votes</th></tr></thead>
+    <tbody>
+    {% for row in rows %}
+      <tr>
+        <td>{{ row.submission.title }} <span class="mono">{{ row.submission.ext_id }}</span></td>
+        <td>{{ row.submission.track.name }}</td>
+        <td class="v"><input type="number" min="0" name="{{ row.submission.ext_id }}" value="{{ row.votes }}"></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="vsum">The sum of squared vote counts must be at most {{ budget }} credits, or the ballot is
+     refused (HTTP 409) and nothing is saved.</p>
+  <button type="submit">Cast ballot</button>
+</form>
+{% else %}
+<p class="empty">No projects have been submitted for voting yet.</p>
+{% endif %}
+{% endblock %}

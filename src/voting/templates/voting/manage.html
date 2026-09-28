@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Community voting · {{ event.name }}{% endblock %}
+{% block content %}
+<style>
+  .vhint{color:var(--muted);font-size:.86rem;margin:.2rem 0 0}
+  .vrow{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0 0}
+  .vrow .tag{font-size:.8rem}
+</style>
+<div class="lede">
+  <h1>Community voting</h1>
+  <p>Configure quadratic community voting for {{ event.name }}. This is a separate track from judge
+     scoring; it never changes the judged, signed results.</p>
+</div>
+
+{% if error %}<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">{{ error }}</div>{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+
+{% if campaign %}
+<div class="vrow">
+  <span class="tag">mode: {{ campaign.get_mode_display }}</span>
+  <span class="tag">budget: {{ campaign.credit_budget }} credits</span>
+  <span class="tag">opens: {{ campaign.opens_at }}</span>
+  <span class="tag">closes: {{ campaign.closes_at }}</span>
+  <span class="tag">results: {% if campaign.results_published %}published{% else %}hidden{% endif %}</span>
+</div>
+{% endif %}
+
+<form class="stack" method="post" action="{% url 'voting:manage' event.ext_id %}">
+  {% csrf_token %}
+  <label for="mode">Voting mode</label>
+  <select id="mode" name="mode">
+    {% for value, label in modes %}
+    <option value="{{ value }}"
+      {% if campaign and campaign.mode == value %}selected{% elif form.mode == value %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <p class="vhint">authenticated = signed-in portal users · email link = anyone confirms by email ·
+     email gated = only allow-listed emails.</p>
+
+  <label for="credit_budget">Credit budget (quadratic: N votes on one project costs N&sup2;)</label>
+  <input id="credit_budget" name="credit_budget" type="number" min="1"
+         value="{% if form.credit_budget %}{{ form.credit_budget }}{% elif campaign %}{{ campaign.credit_budget }}{% else %}25{% endif %}">
+
+  <label for="opens_at">Opens at</label>
+  <input id="opens_at" name="opens_at" type="datetime-local"
+         value="{% if form.opens_at %}{{ form.opens_at }}{% elif campaign %}{{ campaign.opens_at|date:'Y-m-d\TH:i' }}{% endif %}">
+
+  <label for="closes_at">Closes at</label>
+  <input id="closes_at" name="closes_at" type="datetime-local"
+         value="{% if form.closes_at %}{{ form.closes_at }}{% elif campaign %}{{ campaign.closes_at|date:'Y-m-d\TH:i' }}{% endif %}">
+
+  <label for="eligible_emails">Eligible voters (email-gated mode only) — one email per line</label>
+  <textarea id="eligible_emails" name="eligible_emails" rows="5">{% if form.eligible_emails %}{{ form.eligible_emails }}{% else %}{{ eligible_emails }}{% endif %}</textarea>
+  <p class="vhint">Saved only when the mode is email gated. Gmail dot/plus aliases are folded to one
+     identity, so a.b+x@gmail.com and ab@gmail.com count as the same voter.</p>
+
+  <button type="submit">Save campaign</button>
+</form>
+
+<p class="vhint">Results stay hidden (HTTP 404) until you publish them, and publishing is only allowed
+   after the close time. Public results page: <span class="mono">/voting/{{ event.ext_id }}/results</span>.</p>
+{% endblock %}

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Confirm your vote · {{ event.name }}{% endblock %}
+{% block content %}
+<div class="lede">
+  <h1>Confirm your email</h1>
+  <p>Confirm <b>{{ email }}</b> to vote in {{ event.name }}. This confirms your address and takes you
+     to the ballot.</p>
+</div>
+<form class="stack" method="post" action="{% url 'voting:confirm' token %}">
+  {% csrf_token %}
+  <button type="submit">Confirm and continue to the ballot</button>
+</form>
+{% endblock %}

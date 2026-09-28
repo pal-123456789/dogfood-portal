@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Community vote results · {{ event.name }}{% endblock %}
+{% block content %}
+<style>
+  table.vr{border-collapse:collapse;width:100%;margin:14px 0 26px;font-size:.94rem}
+  table.vr th,table.vr td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left}
+  table.vr th{color:var(--muted);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.03em}
+  table.vr td.num{text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .pos{color:var(--accent-ink);font-weight:700}
+</style>
+<div class="lede">
+  <h1>Community vote results</h1>
+  <p>Published community-voting tallies for {{ event.name }}. These reflect audience votes only and
+     are separate from the judged, signed results.</p>
+</div>
+
+<p class="notice">{{ tally.total_voters }} voter(s) cast ballots · {{ tally.total_votes }} vote(s) total.
+   Ranked by total votes; the quadratic budget limits how far any one voter can concentrate support.</p>
+
+{% if tally.rows %}
+<table class="vr">
+  <thead><tr><th>#</th><th>Project</th><th>Track</th><th>Votes</th><th>Voters</th></tr></thead>
+  <tbody>
+  {% for r in tally.rows %}
+    <tr>
+      <td class="pos">{{ r.rank }}</td>
+      <td>{{ r.submission.title }} <span class="mono">{{ r.submission.ext_id }}</span></td>
+      <td>{{ r.submission.track.name }}</td>
+      <td class="num">{{ r.votes }}</td>
+      <td class="num">{{ r.voters }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No projects were available for community voting.</p>
+{% endif %}
+{% endblock %}

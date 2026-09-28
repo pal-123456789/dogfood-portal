@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Vote by email · {{ event.name }}{% endblock %}
+{% block content %}
+<div class="lede">
+  <h1>Vote in {{ event.name }}</h1>
+  <p>This event uses email confirmation for community voting. Enter your email and we will generate a
+     one-time confirmation link.</p>
+</div>
+
+{% if error %}<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">{{ error }}</div>{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+
+<form class="stack" method="post" action="{% url 'voting:join' event.ext_id %}">
+  {% csrf_token %}
+  <label for="email">Email address</label>
+  <input id="email" name="email" type="email" required>
+  {% if campaign.mode == 'email_gated' %}
+  <p class="notice" style="margin-top:10px">This is a restricted vote: only addresses the organizer
+     has added to the eligible-voter list can confirm.</p>
+  {% endif %}
+  <button type="submit">Send me a confirmation link</button>
+</form>
+
+<p class="notice" style="margin-top:16px">Note: this deployment records outbound email rather than
+   sending it (there is no mail integration). The confirmation link is stored as an outbound-email
+   record an organizer can retrieve; it is not shown here, so possession of the delivered link stays
+   the proof of email ownership.</p>
+{% endblock %}

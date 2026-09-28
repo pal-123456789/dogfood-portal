@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Outbound webhooks · {{ event.name }}{% endblock %}
+{% block content %}
+<style>
+  .whint{color:var(--muted);font-size:.86rem;margin:.2rem 0 0}
+  .wscope{border:1px solid var(--line);background:var(--chip);border-radius:8px;padding:12px 14px;
+    color:var(--muted);font-size:.9rem;margin:10px 0}
+  .wtable{width:100%;border-collapse:collapse;margin:8px 0 26px;font-size:.9rem}
+  .wtable th,.wtable td{border:1px solid var(--line);padding:7px 9px;text-align:left;vertical-align:top}
+  .wtable th{background:var(--chip);color:var(--muted);font-weight:600}
+  .st{font-size:.78rem;border-radius:6px;padding:2px 8px;display:inline-block}
+  .st-success{background:#e2f2ec;color:var(--accent-ink)}
+  .st-failed{background:#f6e2e2;color:#8a2b2b}
+  .st-pending{background:var(--chip);color:var(--muted)}
+  .reveal{border:1px solid var(--accent);background:#eef7f4;border-radius:8px;padding:12px 14px;margin:10px 0}
+  .reveal .mono{word-break:break-all}
+  .inline{display:inline}
+  .btn-quiet{background:none;color:var(--accent-ink);border:1px solid var(--line);padding:5px 10px;
+    margin:0;font-size:.82rem;border-radius:7px}
+</style>
+
+<div class="lede">
+  <h1>Outbound webhooks</h1>
+  <p>Register endpoints to receive signed notifications for {{ event.name }}.</p>
+</div>
+
+<div class="wscope">
+  Delivery is <strong>synchronous and best-effort</strong>: this deployment has no background
+  worker, so each event is POSTed once when you dispatch it and every attempt is recorded below.
+  Failed attempts are not retried automatically &mdash; you can retry them manually. Each request
+  is signed with HMAC-SHA256 (headers <span class="mono">X-Dogfood-Event</span>,
+  <span class="mono">X-Dogfood-Timestamp</span>, <span class="mono">X-Dogfood-Signature</span>).
+  URLs are screened for SSRF: only http/https, no embedded credentials, redirects are refused, and
+  any host that resolves to a loopback, private, link-local, reserved, multicast, or unspecified
+  address is rejected. The URL is re-checked immediately before each connection, though a small
+  resolve-then-connect window remains.
+</div>
+
+{% if error %}<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">{{ error }}</div>{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+{% if delivered %}<div class="notice">Dispatched to {{ delivered.sent }} active endpoint{{ delivered.sent|pluralize }}:
+  {{ delivered.success }} succeeded, {{ delivered.failed }} failed.</div>{% endif %}
+
+{% if reveal %}
+<div class="reveal">
+  <strong>New endpoint secret (shown once):</strong>
+  <div class="mono">{{ reveal.secret }}</div>
+  <p class="whint">Store it now. It signs deliveries to this endpoint and is masked after you leave
+     this page.</p>
+</div>
+{% endif %}
+
+<form class="stack" method="post" action="{% url 'webhooks:endpoints' event.ext_id %}">
+  {% csrf_token %}
+  <label for="url">Endpoint URL (https recommended)</label>
+  <input id="url" name="url" type="url" placeholder="https://example.com/hooks/dogfood"
+         value="{{ form.url|default:'' }}" required>
+  <p class="whint">Rejected if it fails the SSRF screen above. Rate limit: {{ rate_limit }}.</p>
+  <button type="submit">Register endpoint</button>
+</form>
+
+<h2 style="font-size:1.1rem">Endpoints</h2>
+{% if endpoints %}
+<table class="wtable">
+  <tr><th>ext_id</th><th>URL</th><th>status</th><th>secret</th><th>created</th><th></th></tr>
+  {% for ep in endpoints %}
+  <tr>
+    <td class="mono">{{ ep.ext_id }}</td>
+    <td class="mono">{{ ep.url }}</td>
+    <td>{% if ep.active %}active{% else %}inactive{% endif %}</td>
+    <td class="mono">&bull;&bull;&bull;&bull;{{ ep.secret|slice:"-4:" }}</td>
+    <td>{{ ep.created_at }}</td>
+    <td>
+      {% if ep.active %}
+      <form class="inline" method="post"
+            action="{% url 'webhooks:delete_endpoint' event.ext_id ep.ext_id %}">
+        {% csrf_token %}
+        <button class="btn-quiet" type="submit">Deactivate</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="empty">No endpoints registered yet.</p>
+{% endif %}
+
+<form class="stack" method="post" action="{% url 'webhooks:deliver' event.ext_id %}">
+  {% csrf_token %}
+  <label for="event_type">Send a test event to all active endpoints</label>
+  <input id="event_type" name="event_type" type="text" value="ping">
+  <button type="submit">Dispatch now</button>
+</form>
+
+<h2 style="font-size:1.1rem">Recent deliveries</h2>
+{% if deliveries %}
+<table class="wtable">
+  <tr><th>ext_id</th><th>endpoint</th><th>event</th><th>status</th><th>attempts</th>
+      <th>code</th><th>error</th><th>last attempt</th><th></th></tr>
+  {% for d in deliveries %}
+  <tr>
+    <td class="mono">{{ d.ext_id }}</td>
+    <td class="mono">{{ d.endpoint.ext_id }}</td>
+    <td>{{ d.event_type }}</td>
+    <td><span class="st st-{{ d.status }}">{{ d.status }}</span></td>
+    <td>{{ d.attempts }}</td>
+    <td>{{ d.response_code|default:"" }}</td>
+    <td>{{ d.error }}</td>
+    <td>{{ d.last_attempt_at|default:"" }}</td>
+    <td>
+      {% if d.status == "failed" %}
+      <form class="inline" method="post"
+            action="{% url 'webhooks:retry' event.ext_id d.ext_id %}">
+        {% csrf_token %}
+        <button class="btn-quiet" type="submit">Retry</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="empty">No deliveries recorded yet.</p>
+{% endif %}
+{% endblock %}

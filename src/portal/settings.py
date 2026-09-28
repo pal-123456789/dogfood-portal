@@ -31,6 +31,14 @@ INSTALLED_APPS = [
     # Read-only public API (/api/v1/): DRF + drf-spectacular OpenAPI 3 schema/docs. Self-hosted
     # Swagger UI assets via sidecar (no CDN). `api` has no models, so no migration is added.
     "rest_framework", "drf_spectacular", "drf_spectacular_sidecar", "api",
+    # T3/T4 feature apps (additive; each owns its own tables/URL prefix and touches none of the
+    # five flat checker routes). `voting` and `comments` ship models + a 0001 migration; `records`
+    # and `embed` are model-free (records/embeds are computed on the fly from the live event graph).
+    "voting", "comments", "records", "embed",
+    # Wave-2 T4 operability apps (additive; own tables/URL prefix; touch none of the five flat
+    # checker routes). `bundles` is model-free (a signed export is computed on the fly from the live
+    # event graph); `webhooks` ships models + a 0001 migration for endpoints and recorded deliveries.
+    "bundles", "webhooks",
 ]
 
 MIDDLEWARE = [                                                  # §6: this order, all stock
@@ -124,6 +132,12 @@ DOGFOOD_RATE_LIMITS = {                       # [T-0] names follow THREAT-MODEL 
     "invite_redeem": os.environ.get("DOGFOOD_RATE_INVITE_REDEEM", "20/h"),
     "submission_write": os.environ.get("DOGFOOD_RATE_SUBMISSION_WRITE", "60/h"),
     "ballot_write": os.environ.get("DOGFOOD_RATE_BALLOT_WRITE", "120/h"),
+    # T3 community voting: ballot casts (per campaign+voter) and project comments (per author).
+    "vote_write": os.environ.get("DOGFOOD_RATE_VOTE_WRITE", "20/m"),
+    "comment_write": os.environ.get("DOGFOOD_RATE_COMMENT_WRITE", "60/h"),
+    # T4 outbound webhooks: endpoint registration (per event+organizer). webhooks.views reads this
+    # via .get(default), so the key is optional at runtime; it is set here so the limit is explicit.
+    "webhook_write": os.environ.get("DOGFOOD_RATE_WEBHOOK_WRITE", "60/h"),
 }
 
 # --- Read-only public API (/api/v1/) -------------------------------------------------------
