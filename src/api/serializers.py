@@ -56,3 +56,80 @@ class SubmissionSerializer(serializers.ModelSerializer):
         fields = ("ext_id", "title", "summary", "repo_url", "state",
                   "submitted_at", "created_at",
                   "event", "track", "track_name", "team", "team_name")
+
+
+# --- Verifiable results certificate (T4) ---------------------------------------------------------
+# Output-only, EXPLICIT-field serializers for the results certificate served at
+# /api/v1/events/<ext_id>/certificate/. Like the ModelSerializers above they are an allowlist --
+# they can only ever emit the fields declared here, so serializing the certificate through them is a
+# second, structural guarantee that no PII escapes (the certificate dict built by
+# normalize.certificate already excludes it). These are plain Serializers, not ModelSerializers:
+# the certificate is assembled from a signed, published NormalizationRun, not a single model row.
+# Nested dicts each get a tiny serializer so drf-spectacular emits a fully typed schema.
+
+class CertificateEventSerializer(serializers.Serializer):
+    ext_id = serializers.CharField()
+    name = serializers.CharField(allow_blank=True)
+
+
+class CertificatePublicationSerializer(serializers.Serializer):
+    version = serializers.IntegerField()
+    status = serializers.CharField()                       # 'provisional' | 'final'
+    published_at = serializers.CharField(allow_blank=True)
+
+
+class CertificateSignatureSerializer(serializers.Serializer):
+    algorithm = serializers.CharField()                    # 'ed25519'
+    value = serializers.CharField()                        # hex signature
+    public_key_pem = serializers.CharField(allow_null=True, required=False)
+
+
+class CertificateSignedMaterialSerializer(serializers.Serializer):
+    # EXACTLY the fields the Ed25519 run signature covers (normalize.signing.RUN_FIELDS). No PII.
+    engine_version = serializers.CharField()
+    instance_id = serializers.CharField()
+    event_ext_id = serializers.CharField()
+    run_ext_id = serializers.CharField()
+    inputs_hash = serializers.CharField()
+    result_hash = serializers.CharField()
+    created_at = serializers.CharField()
+
+
+class CertificateRunProvenanceSerializer(serializers.Serializer):
+    audit_seq = serializers.IntegerField(allow_null=True)
+    lambda_value = serializers.FloatField(allow_null=True)
+    n_boot = serializers.IntegerField(allow_null=True)
+    seed = serializers.IntegerField(allow_null=True)
+
+
+class CertificateRankingRowSerializer(serializers.Serializer):
+    # The public ranking columns only (same as ranking.csv): rank, submission ext_id, title,
+    # normalized q. No per-judge or per-criterion scores, no ballots.
+    rank = serializers.IntegerField()
+    submission = serializers.CharField()
+    title = serializers.CharField(allow_blank=True)
+    q = serializers.FloatField()
+
+
+class CertificateVerificationSerializer(serializers.Serializer):
+    verifier_command = serializers.CharField()
+    run_verifier_command = serializers.CharField()
+    steps = serializers.ListField(child=serializers.CharField())
+    scope = serializers.CharField()
+
+
+class ResultsCertificateSerializer(serializers.Serializer):
+    """The full certificate envelope. Read-only; every field is non-PII and copied verbatim from a
+    signed, published normalization run (see normalize.certificate)."""
+    kind = serializers.CharField()
+    attestation = serializers.CharField()
+    event = CertificateEventSerializer()
+    publication = CertificatePublicationSerializer()
+    engine_version = serializers.CharField()
+    result_hash = serializers.CharField()
+    signer_fingerprint = serializers.CharField()
+    signature = CertificateSignatureSerializer()
+    signed_material = CertificateSignedMaterialSerializer()
+    run_provenance = CertificateRunProvenanceSerializer()
+    ranking = CertificateRankingRowSerializer(many=True)
+    verification = CertificateVerificationSerializer()

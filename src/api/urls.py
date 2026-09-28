@@ -22,4 +22,9 @@ urlpatterns = [
     path("events/<str:ext_id>/results/", views.EventResultsView.as_view(), name="event-results"),
     path("schema/", SpectacularAPIView.as_view(), name="schema"),
     path("docs/", views.CspSwaggerView.as_view(url_name="api:schema"), name="docs"),
+    # Appended (T4): verifiable results certificate for an event's official PUBLISHED results.
+    # Read-only GET; exact-path match, so its position after the schema routes cannot shadow, and
+    # is not shadowed by, any route above (event-detail matches only `events/<id>/`).
+    path("events/<str:ext_id>/certificate/", views.EventCertificateView.as_view(),
+         name="event-certificate"),
 ]

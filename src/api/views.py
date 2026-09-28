@@ -13,15 +13,16 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, extend_schema
 from drf_spectacular.views import SpectacularSwaggerView
 from rest_framework import generics
+from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from events.models import Event, Team, Track
-from normalize import results as results_service
+from normalize import certificate, results as results_service
 from submissions.models import Submission
 
-from .serializers import (EventSerializer, SubmissionSerializer, TeamSerializer,
-                          TrackSerializer)
+from .serializers import (EventSerializer, ResultsCertificateSerializer, SubmissionSerializer,
+                          TeamSerializer, TrackSerializer)
 
 
 def _event_or_404(ext_id):
@@ -102,6 +103,48 @@ class EventResultsView(APIView):
 
     def get(self, request, ext_id):
         return Response(results_service.current_results(_event_or_404(ext_id)))
+
+
+_CERTIFICATE_EXAMPLE = OpenApiExample(
+    "Certificate for a published run", response_only=True,
+    value={
+        "kind": "dogfood.results-certificate.v1",
+        "attestation": ("Attests that the operator's Ed25519 key signed the published run below; "
+                        "not a measure of merit and not fraud detection."),
+        "event": {"ext_id": "evt_01", "name": "Spring Hackathon"},
+        "publication": {"version": 1, "status": "final",
+                        "published_at": "2026-09-28T12:00:00+00:00"},
+        "engine_version": "ridge-additive-v1",
+        "result_hash": "<hex>", "signer_fingerprint": "<hex>",
+        "signature": {"algorithm": "ed25519", "value": "<hex>", "public_key_pem": "<pem>"},
+        "signed_material": {"engine_version": "ridge-additive-v1", "instance_id": "<id>",
+                            "event_ext_id": "evt_01", "run_ext_id": "run_ab12cd34",
+                            "inputs_hash": "<hex>", "result_hash": "<hex>",
+                            "created_at": "2026-09-28T11:59:00+00:00"},
+        "run_provenance": {"audit_seq": 42, "lambda_value": 1.0, "n_boot": 1000, "seed": 0},
+        "ranking": [{"rank": 1, "submission": "prj_a", "title": "Title prj_a", "q": 4.0}],
+        "verification": {"verifier_command": "python -m normalize.release <bundle_dir>",
+                         "run_verifier_command": "python -m normalize.verify <bundle_dir>",
+                         "steps": ["This certificate copies its result_hash, signature, fingerprint "
+                                   "and ranking verbatim from a signed, frozen run."],
+                         "scope": ("signed, published-run attestation -- not merit, not fraud "
+                                   "detection")}})
+
+
+@extend_schema(tags=["results"], responses=ResultsCertificateSerializer,
+               examples=[_CERTIFICATE_EXAMPLE])
+class EventCertificateView(APIView):
+    """Verifiable results certificate for one event's official PUBLISHED results -- a self-contained
+    attestation over the FROZEN, signed normalization run (never a live recompute). Returns 404 when
+    the event has no published results. Carries only published-safe values: the run's result_hash,
+    signer fingerprint, public key, signature and the public ranking (rank/submission/title/q) --
+    no per-judge scores, no ballots, no judge identities, no user PII."""
+
+    def get(self, request, ext_id):
+        cert = certificate.certificate_for_event(_event_or_404(ext_id))
+        if cert is None:
+            raise NotFound("no published results to certify for this event")
+        return Response(ResultsCertificateSerializer(cert).data)
 
 
 class CspSwaggerView(SpectacularSwaggerView):
