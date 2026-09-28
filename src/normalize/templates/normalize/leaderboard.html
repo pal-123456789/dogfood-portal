@@ -13,6 +13,8 @@
   .delta.up{color:var(--accent-ink)} .delta.dn{color:#b23a3a}
   .flag{font-size:.72rem;color:#8a5a00;background:#fbf0d8;border-radius:6px;padding:1px 7px;white-space:nowrap}
   .ci{color:var(--muted);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.85rem}
+  .range{color:var(--muted)}
+  .wp{display:block;margin-top:2px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:.78rem;color:var(--muted)}
   .cred{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:8px 0 32px;background:var(--panel,#fafafa)}
   .cred h2{margin:0 0 4px;font-size:.9rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
   .cred .sub{margin:0 0 12px;font-size:.82rem;color:var(--muted)}
@@ -43,11 +45,14 @@
 <p class="notice">Rank is by point quality q. <b>Δ</b> = q − raw mean (how much removing judge
 severity moved the project). The <span class="flag">unresolved</span> flag marks an adjacent
 pair the bootstrap cannot separate (win-prob in [0.10, 0.90] or Δq &lt; 0.25) — the data does
-not resolve that order. Machine-readable: <a href="leaderboard.json">leaderboard.json</a>.</p>
+not resolve that order. The <b>could finish A–B</b> interval and the <b>beats #N in X%</b> win
+probability are a parametric bootstrap over <b>{{ data.n_boot }}</b> resamples at a fixed seed
+({{ bootstrap_seed }}); this live workbench recompute is display-only and not part of any signed
+or published result. Machine-readable: <a href="leaderboard.json">leaderboard.json</a>.</p>
 <table class="lb">
   <thead><tr>
     <th>#</th><th>Project</th><th>Track</th>
-    <th>q</th><th>Raw</th><th>Δ</th><th>90% rank</th><th>Ballots</th><th></th>
+    <th>q</th><th>Raw</th><th>Δ</th><th>Rank confidence</th><th>Ballots</th><th></th>
   </tr></thead>
   <tbody>
   {% for r in data.rows %}
@@ -58,7 +63,7 @@ not resolve that order. Machine-readable: <a href="leaderboard.json">leaderboard
       <td class="num">{{ r.q }}</td>
       <td class="num">{{ r.raw_mean }}</td>
       <td class="num delta {% if r.delta >= 0 %}up{% else %}dn{% endif %}">{{ r.delta }}</td>
-      <td class="ci">[{{ r.rank_lo }}, {{ r.rank_hi }}]</td>
+      <td class="ci">rank {{ r.rank }} <span class="range">(could finish {{ r.rank_lo }}&#8211;{{ r.rank_hi }})</span>{% widthratio r.win_next 1 100 as win_pct %}{% if win_pct %}<span class="wp">beats #{{ r.rank|add:"1" }} in {{ win_pct }}% of resamples</span>{% endif %}</td>
       <td class="num">{{ r.n_ballots }}</td>
       <td>{% if r.tied_with_next %}<span class="flag">unresolved ↓</span>{% endif %}</td>
     </tr>

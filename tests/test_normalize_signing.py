@@ -107,3 +107,22 @@ def test_canonical_result_excludes_only_gauge_error():
     assert (signing.content_hash("result", engine.canonical_result(result))
             == signing.content_hash("result", engine.canonical_result(other)))
 
+
+def test_display_only_win_next_never_moves_result_hash():
+    # win_next (a display-only per-row bootstrap read: P this row outranks the next) rides on the
+    # leaderboard dict but is stripped by canonical_result, so a run carrying it hashes IDENTICALLY
+    # to one without it -- publishing/verifying the interval + win prob cannot move result_hash.
+    base_rows = [{"rank": 1, "submission": "prj_a", "q": 4.2, "rank_lo": 1, "rank_hi": 2},
+                 {"rank": 2, "submission": "prj_b", "q": 3.1, "rank_lo": 1, "rank_hi": 2}]
+    without = {"rows": [dict(r) for r in base_rows], "n_ballots": 6, "lambda": 1.0, "sigma": 0.4,
+               "gauge_error": 2.2e-15, "n_components": 1, "n_boot": 200, "n_submissions": 2,
+               "n_judges": 3, "unresolved_count": 0}
+    with_wn = {**without, "rows": [dict(base_rows[0], win_next=0.5183),
+                                   dict(base_rows[1], win_next=None)]}
+    canon = engine.canonical_result(with_wn)
+    assert not any("win_next" in r for r in canon["rows"])          # stripped from every row
+    assert set(canon) == set(with_wn) - {"gauge_error"}             # top-level invariant preserved
+    # The signed content hash is byte-identical with and without the display-only field present.
+    assert (signing.content_hash("result", engine.canonical_result(with_wn))
+            == signing.content_hash("result", engine.canonical_result(without)))
+

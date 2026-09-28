@@ -106,6 +106,7 @@ def current_results(event) -> dict:
         "inputs_hash": run.inputs_hash,
         "fingerprint": run.fingerprint,
         "lambda": run.lambda_value,
+        "seed": run.seed,
         "audit_seq": pub.audit_seq,
         "published_at": pub.recorded_at.isoformat(),
         "result": run.result,

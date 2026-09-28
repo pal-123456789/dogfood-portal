@@ -359,6 +359,12 @@ def compute_leaderboard(y, judge_keys, sub_keys, display, n_boot=1000, seed=0, l
         i = idx[s]
         title, track = display.get(s, (s, ""))
         tied_next = pos < len(order) and frozenset((s, order[pos])) in unresolved
+        # P(this project outranks the very next row), read off the SAME bootstrap the rank
+        # intervals use: win_prob[i][j] is the fraction of draws with q_i > q_j. Display-only --
+        # dropped by canonical_result (exactly like gauge_error), so it can never move a signed
+        # result_hash. None on the last row, which has no next project.
+        win_next = (round(float(rep["win_prob"][i][idx[order[pos]]]), 4)
+                    if pos < len(order) else None)
         rows.append({
             "rank": pos,
             "submission": s,
@@ -373,6 +379,7 @@ def compute_leaderboard(y, judge_keys, sub_keys, display, n_boot=1000, seed=0, l
             "n_ballots": counts.get(s, 0),
             "tied_with_next": tied_next,
             "component": comp_by_sub[s],
+            "win_next": win_next,
         })
     return {
         "rows": rows,
@@ -386,6 +393,18 @@ def compute_leaderboard(y, judge_keys, sub_keys, display, n_boot=1000, seed=0, l
         "n_boot": rep["n_boot"],
         "unresolved_count": len(rep["unresolved"]),
     }
+
+
+# Per-row leaderboard fields that are DISPLAY-ONLY: rendered in the UI but never committed to by a
+# signed run, so canonical_result drops them from every row exactly as it drops the top-level
+# gauge_error. `win_next` -- P(this row outranks the next), read from the live bootstrap -- is honest
+# to show but must not be able to move a published result_hash, so it is stripped before hashing.
+_UNSIGNED_ROW_FIELDS = ("win_next",)
+
+
+def _project_row(row):
+    """A leaderboard row minus the display-only fields (see _UNSIGNED_ROW_FIELDS)."""
+    return {k: v for k, v in row.items() if k not in _UNSIGNED_ROW_FIELDS}
 
 
 def _strip_negative_zero(x):
@@ -418,10 +437,16 @@ def canonical_result(result):
     Negative zero is folded to +0.0 (see _strip_negative_zero): a rounded delta can land on -0.0,
     which jsonb silently rewrites to 0, so the projection must not depend on a zero's sign or a
     run reloaded from the database could never reproduce its result_hash.
+    Each row is likewise projected through _project_row, which drops the display-only per-row
+    fields (_UNSIGNED_ROW_FIELDS, e.g. win_next) for the same reason gauge_error is dropped: they
+    are honest to render but are not part of what the run commits to, so they never touch the hash.
     Hashing this projection -- not the raw dict -- is what lets an independent verifier confirm the
     published ranking without demanding bit-identical floating point on the diagnostic self-check.
     """
-    return _strip_negative_zero({k: result[k] for k in sorted(result) if k != "gauge_error"})
+    projected = {k: result[k] for k in sorted(result) if k != "gauge_error"}
+    if isinstance(projected.get("rows"), list):
+        projected["rows"] = [_project_row(r) for r in projected["rows"]]
+    return _strip_negative_zero(projected)
 
 
 

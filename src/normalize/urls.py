@@ -11,6 +11,7 @@ urlpatterns = [
     path("pairwise", views.pairwise, name="pairwise"),
     path("results", views.results, name="results"),
     path("results.json", views.results_json, name="results_json"),
+    path("results/explain/<str:ext_id>", views.explain_rank, name="explain_rank"),
     path("results/publish", views.results_publish, name="results_publish"),
     path("diagnostics", views.diagnostics, name="diagnostics"),
     path("diagnostics.json", views.diagnostics_json, name="diagnostics_json"),

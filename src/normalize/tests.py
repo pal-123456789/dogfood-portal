@@ -8,6 +8,9 @@ that stays inside the grid, and determinism. NormalizeServiceTests wires a tiny 
 through the ORM and asserts the service output plus the organizer-only access gate (401/403/200)
 - the same gate shape as the CSV export, on routes that are NOT the checker's five.
 """
+import copy
+import json
+
 import numpy as np
 
 from django.contrib.auth import get_user_model
@@ -16,7 +19,7 @@ from django.utils import timezone
 
 from audit.models import AuditEvent
 from audit.service import current_head
-from events.models import Event, EventMembership, Team, Track
+from events.models import Event, EventMembership, Team, TeamMember, Track
 from judging.models import Ballot, JudgeAssignment, RubricWeight
 from submissions.models import Submission
 
@@ -73,6 +76,45 @@ class EngineTests(SimpleTestCase):
         r1 = engine.rank_report(y, jk, sk, lam=1.0, n_boot=200, seed=0)
         r2 = engine.rank_report(y, jk, sk, lam=1.0, n_boot=200, seed=0)
         self.assertTrue(np.allclose(r1["q"], r2["q"]))
+        # Determinism at a fixed seed extends to the whole uncertainty layer, not just q.
+        for k in ("rank_lo", "rank_median", "rank_hi", "win_prob", "q_se"):
+            self.assertTrue(np.allclose(r1[k], r2[k]), k)
+        # The point-estimate rank of every submission falls inside its own 90% bootstrap
+        # interval, and the interval is well-formed (lo <= median <= hi, within [1, n]).
+        lo, md, hi = r1["rank_lo"], r1["rank_median"], r1["rank_hi"]
+        point = (-np.asarray(r1["q"])).argsort().argsort() + 1     # 1 == best (highest q)
+        n = len(r1["subs"])
+        self.assertTrue(np.all((lo <= point) & (point <= hi)))
+        self.assertTrue(np.all((lo <= md) & (md <= hi)))
+        self.assertTrue(np.all((1 <= lo) & (hi <= n)))
+
+    def test_win_next_is_display_only_and_off_the_signed_projection(self):
+        # win_next (P a row outranks the next) rides on the DISPLAY dict but must never reach the
+        # signed projection: compute_leaderboard emits it, canonical_result strips it, and the
+        # canonical bytes are byte-identical to a run computed without it -> result_hash is unchanged.
+        rng = np.random.default_rng(7)
+        jk = ["j%d" % j for j in range(4) for _ in range(5)]
+        sk = ["s%d" % ((j + 2 * k) % 6) for j in range(4) for k in range(5)]
+        y = list(rng.uniform(1, 5, size=len(jk)))
+        disp = {s: ("Title " + s, "trk_x") for s in set(sk)}
+        res = engine.compute_leaderboard(y, jk, sk, disp, n_boot=150, seed=0, lam=1.0)
+        self.assertTrue(all("win_next" in r for r in res["rows"]))     # present on the display dict
+        self.assertIsNone(res["rows"][-1]["win_next"])                 # None on the last row
+        self.assertIsInstance(res["rows"][0]["win_next"], float)
+        canon = engine.canonical_result(res)
+        self.assertFalse(any("win_next" in r for r in canon["rows"]))  # stripped from the projection
+        self.assertEqual(set(canon), set(res) - {"gauge_error"})       # top-level invariant holds
+
+        def canon_bytes(x):
+            return json.dumps(x, sort_keys=True, separators=(",", ":"),
+                              ensure_ascii=False, allow_nan=False)
+
+        stripped = copy.deepcopy(res)                                  # emulate the pre-change dict
+        for r in stripped["rows"]:
+            r.pop("win_next", None)
+        pre_change = engine._strip_negative_zero(
+            {k: stripped[k] for k in sorted(stripped) if k != "gauge_error"})
+        self.assertEqual(canon_bytes(canon), canon_bytes(pre_change))  # signed bytes unchanged
 
 class NormalizeServiceTests(TestCase):
     @classmethod
@@ -871,6 +913,21 @@ class FinalizationGovernanceUITests(TestCase):
         self.assertNotContains(resp, "Credibility")
         self.assertNotContains(resp, "Recomputed from the current ballots")
 
+    def test_public_results_render_rank_interval_and_win_probability(self):
+        # #129 -- the 90% bootstrap rank interval ("could finish A-B") and the per-row win
+        # probability render on the frozen public page as an honest, clearly-labelled signal, with
+        # the win prob marked display-only / not signed and the organizer-only "outranks" wording
+        # kept off this page.
+        results.publish_results(self.event, key=self._key(), status=ResultPublication.FINAL,
+                                n_boot=120, seed=0)
+        resp = Client().get("/normalize/results")
+        self.assertContains(resp, "could finish")                 # rank N (could finish A-B)
+        self.assertContains(resp, "beats #")                      # per-row win-probability line
+        self.assertContains(resp, "resamples")                    # bootstrap labelling
+        self.assertContains(resp, "display-only")                 # win prob is not signed ...
+        self.assertContains(resp, "part of the signed result")    # ... stated honestly
+        self.assertNotContains(resp, "outranks")                  # pairwise wording stays organizer-only
+
     def test_public_provisional_publish_shows_provisional_banner(self):
         results.publish_results(self.event, key=self._key(),
                                 status=ResultPublication.PROVISIONAL, n_boot=120, seed=0)
@@ -953,4 +1010,110 @@ class PairwiseSensitivityUITests(TestCase):
         self.assertContains(resp, "Official</span>")            # it IS the official frozen page ...
         self.assertNotContains(resp, "Pairwise sensitivity")    # ... and it has no pairwise panel
         self.assertNotContains(resp, "outranks")
+
+
+class ExplainRankViewTests(TestCase):
+    """`explain_rank` -- the participant-facing "why you finished rank N" page.
+
+    It is a READ-ONLY interpretation of one row of the PUBLISHED, signed run (never a recompute),
+    so these tests pin the access contract, not the arithmetic (that lives in tests/test_explain.py):
+    anonymous browsers are sent to login; the owning team and organizers get 200; everyone else and
+    every unknown id get a UNIFORM 404; the page carries the honest no-blame caveat and is marked
+    private / no-store / noindex; and before an organizer publishes, even an owner gets 404.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.event = Event.objects.create(
+            ext_id="evt_x", name="Explain Event", state=Event.CLOSED,
+            submissions_close=timezone.now() - timezone.timedelta(days=1))
+        track = Track.objects.create(ext_id="trk_x", event=cls.event, name="X")
+        cls.team = Team.objects.create(ext_id="tm_x", event=cls.event, name="Owning Team")
+        for c in engine.CRITERIA:
+            RubricWeight.objects.create(event=cls.event, criterion=c, weight=1.0)
+        subs = {}
+        for sid in ("prj_x1", "prj_x2", "prj_x3"):
+            subs[sid] = Submission.objects.create(
+                ext_id=sid, event=cls.event, team=cls.team, track=track,
+                title="Title %s" % sid, state=Submission.SUBMITTED)
+        base = {"prj_x1": 4, "prj_x2": 3, "prj_x3": 2}
+        bias = [0, 1, -1]
+        for n in range(3):
+            u = User.objects.create_user(email="xjudge%d@t.demo" % n, display_name="XJ%d" % n)
+            m = EventMembership.objects.create(
+                user=u, event=cls.event, role=EventMembership.JUDGE, ext_id="jdg_x%d" % n)
+            for sid, sub in subs.items():
+                a = JudgeAssignment.objects.create(judge=m, submission=sub)
+                v = base[sid] + bias[n]
+                Ballot.objects.create(assignment=a, functionality=v, quality=v, innovation=v)
+        cls.org = User.objects.create_user(email="xorg@t.demo", display_name="XOrg")
+        EventMembership.objects.create(user=cls.org, event=cls.event,
+                                       role=EventMembership.ORGANIZER)
+        cls.owner = User.objects.create_user(email="xowner@t.demo", display_name="XOwner")
+        EventMembership.objects.create(user=cls.owner, event=cls.event,
+                                       role=EventMembership.PARTICIPANT)
+        TeamMember.objects.create(team=cls.team, user=cls.owner)
+        cls.outsider = User.objects.create_user(email="xout@t.demo", display_name="XOut")
+        EventMembership.objects.create(user=cls.outsider, event=cls.event,
+                                       role=EventMembership.PARTICIPANT)
+
+    def _key(self):
+        from audit import receipts
+        return receipts.generate_private_key()
+
+    def setUp(self):
+        results.publish_results(self.event, key=self._key(), n_boot=120, seed=0)
+
+    # PLACEHOLDER_EXPLAIN_TESTS
+    def test_anonymous_is_sent_to_login(self):
+        resp = Client().get("/normalize/results/explain/prj_x1")
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("next=", resp.url)
+
+    def test_owning_team_member_gets_the_page_with_honest_caveats(self):
+        c = Client()
+        c.force_login(self.owner)
+        resp = c.get("/normalize/results/explain/prj_x1")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, "normalize/explain.html")
+        self.assertContains(resp, "Why you finished rank")
+        self.assertContains(resp, "not a finding that any judge was biased")
+        self.assertNotContains(resp, "viewing this as an organizer")
+        self.assertEqual(resp["Cache-Control"], "private, no-store")
+        self.assertEqual(resp["Vary"], "Cookie")
+        self.assertIn("noindex", resp["X-Robots-Tag"])
+
+    def test_organizer_gets_the_page_flagged_as_organizer_view(self):
+        c = Client()
+        c.force_login(self.org)
+        resp = c.get("/normalize/results/explain/prj_x1")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "viewing this as an organizer")
+
+    def test_outsider_participant_gets_uniform_404(self):
+        c = Client()
+        c.force_login(self.outsider)
+        resp = c.get("/normalize/results/explain/prj_x1")
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.content, b"no such project")
+
+    def test_owner_unknown_id_is_404_before_leaking_existence(self):
+        c = Client()
+        c.force_login(self.owner)
+        self.assertEqual(c.get("/normalize/results/explain/prj_zzz").status_code, 404)
+
+    def test_organizer_unknown_id_is_404_via_missing_row(self):
+        c = Client()
+        c.force_login(self.org)
+        self.assertEqual(c.get("/normalize/results/explain/prj_zzz").status_code, 404)
+
+    def test_owner_gets_404_when_results_not_published(self):
+        from unittest import mock
+        c = Client()
+        c.force_login(self.owner)
+        with mock.patch("normalize.views.results_svc.current_results",
+                        return_value={"published": False}):
+            resp = c.get("/normalize/results/explain/prj_x1")
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.content, b"results not published")
 

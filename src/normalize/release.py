@@ -35,6 +35,9 @@ from audit import verify as audit_verify
 from . import verify as norm_verify
 
 # result["rows"] keys, in a FROZEN column order -- engine_version pins the schema, so this is stable.
+# Display-only per-row fields (engine._UNSIGNED_ROW_FIELDS, e.g. win_next) are deliberately absent:
+# ranking_csv reads only these columns, so the signed CSV mirrors canonical_result and never carries
+# a value the run does not commit to.
 RANKING_COLUMNS = ("rank", "submission", "title", "track", "q", "raw_mean", "delta",
                    "rank_lo", "rank_median", "rank_hi", "n_ballots", "tied_with_next", "component")
 

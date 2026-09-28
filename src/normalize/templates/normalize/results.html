@@ -11,6 +11,8 @@
   .delta.up{color:var(--accent-ink)} .delta.dn{color:#b23a3a}
   .flag{font-size:.72rem;color:#8a5a00;background:#fbf0d8;border-radius:6px;padding:1px 7px;white-space:nowrap}
   .ci{color:var(--muted);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.85rem}
+  .range{color:var(--muted)}
+  .wp{display:block;margin-top:2px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:.78rem;color:var(--muted)}
   .prov{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:14px 0 8px;background:var(--panel,#fafafa)}
   .prov h2{margin:0 0 8px;font-size:.9rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
   .prov dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:0;font-size:.86rem}
@@ -54,7 +56,7 @@ official ranking here once judging is complete; until then, rankings are not pub
 <table class="lb">
   <thead><tr>
     <th>#</th><th>Project</th><th>Track</th>
-    <th>q</th><th>Raw</th><th>Δ</th><th>90% rank</th><th>Ballots</th><th></th>
+    <th>q</th><th>Raw</th><th>Δ</th><th>Rank confidence</th><th>Ballots</th><th></th>
   </tr></thead>
   <tbody>
   {% for r in data.result.rows %}
@@ -65,7 +67,7 @@ official ranking here once judging is complete; until then, rankings are not pub
       <td class="num">{{ r.q }}</td>
       <td class="num">{{ r.raw_mean }}</td>
       <td class="num delta {% if r.delta >= 0 %}up{% else %}dn{% endif %}">{{ r.delta }}</td>
-      <td class="ci">[{{ r.rank_lo }}, {{ r.rank_hi }}]</td>
+      <td class="ci">rank {{ r.rank }} <span class="range">(could finish {{ r.rank_lo }}&#8211;{{ r.rank_hi }})</span>{% widthratio r.win_next 1 100 as win_pct %}{% if win_pct %}<span class="wp">beats #{{ r.rank|add:"1" }} in {{ win_pct }}% of resamples</span>{% endif %}</td>
       <td class="num">{{ r.n_ballots }}</td>
       <td>{% if r.tied_with_next %}<span class="flag">unresolved ↓</span>{% endif %}</td>
     </tr>
@@ -81,9 +83,13 @@ official ranking here once judging is complete; until then, rankings are not pub
   <p style="margin:0 0 8px">Severity-adjusted quality (<b>q</b>) from a ridge / partial-pooling model:
   each judge's tendency to score high or low is estimated and removed, so a project seen by harsher
   judges is not penalised for it. Rank is by q.</p>
-  <p style="margin:0 0 8px">The <b>90% rank interval</b> is a bootstrap over ballots. When two
-  projects' intervals overlap, the data does not separate them — read that pair as a tie, not a
-  settled order.</p>
+  <p style="margin:0 0 8px">The <b>90% rank interval</b> ("could finish A&#8211;B") and the
+  <b>win probability</b> ("beats the next project in X% of resamples") come from a parametric
+  bootstrap over <b>{{ data.result.n_boot }}</b> resamples at a fixed, disclosed seed
+  ({{ data.seed }}), so both reproduce exactly. The interval is part of this signed run and
+  re-derives to <code>result_hash</code>; the win probability is a <b>display-only</b> read and is
+  <b>not</b> part of the signed result. When two projects' intervals overlap, the data does not
+  separate them — read that pair as a tie, not a settled order.</p>
   <p style="margin:0 0 8px">It ranks <b>the scores judges gave</b>. It does not measure merit beyond
   those scores, and it does not detect collusion or fraud; robustness and coverage checks live in the
   organizer diagnostics panel, not here.</p>

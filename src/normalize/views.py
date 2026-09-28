@@ -14,13 +14,17 @@ Two audiences, one clean split (docs/THREAT-MODEL.md W1):
 Every route here lives under /normalize/ and is NOT one of the five the acceptance checker hits, so
 nothing in this module can move replay off 7/7.
 """
+from django.contrib.auth.views import redirect_to_login
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_http_methods
 
 from audit import keys
 from events.models import EventMembership
+from events import services as events_services
+from submissions import services as submissions_services
 
+from . import explain as explain_mod
 from . import results as results_svc  # module aliased so the public `results` view can keep its name
 from . import services
 from .models import ResultPublication
@@ -83,8 +87,11 @@ def leaderboard(request):
     # n_boot is trimmed here (the SEs stay honest) so the organizer page renders snappily.
     proof = services.proof_report(event, n_boot=400) if data.get("rows") else None
     pub = results_svc.current_publication(event)
+    # services.leaderboard() self-seeds at 0 (its default); disclosed so the bootstrap columns
+    # (rank interval + win prob) are reproducible. Display-only -- never part of a signed run.
     return render(request, "normalize/leaderboard.html",
                   {"event": event, "data": data, "proof": proof,
+                   "bootstrap_seed": 0,
                    "live_published": pub is not None,
                    "live_status": pub.status if pub else "",
                    "live_version": pub.version if pub else 0})
@@ -187,3 +194,48 @@ def diagnostics_json(request):
         msg, status = err
         return JsonResponse({"detail": msg}, status=status)
     return JsonResponse(services.diagnostics_report(event))
+
+
+def explain_rank(request, ext_id):
+    """PARTICIPANT-facing "explain my rank" -- a read-only, plain-language interpretation of ONE
+    project's row in the event's PUBLISHED, signed results.
+
+    It never recomputes: it reads the frozen signed `result` (results_svc.current_results) and
+    hands a single row to normalize.explain, so it cannot move a `result_hash`. Access is the
+    owning team OR an organizer; authentication is required (browsers are sent to login) and every
+    other case returns a uniform 404. Because the per-project figures are ALREADY public on
+    /normalize/results(.json), this scoping is the "explain MY rank" frame plus defense-in-depth,
+    not a secrecy boundary. The response is per-caller, so it is marked private/no-store/noindex.
+    """
+    event = services.current_event()
+    if event is None:
+        return HttpResponse("no event configured", status=404, content_type="text/plain")
+    if not (request.user and request.user.is_authenticated):
+        return redirect_to_login(request.get_full_path())
+
+    is_org = events_services.is_organizer(request.user, event)
+    owned = set(submissions_services.owned_submissions(request.user, event)
+                .values_list("ext_id", flat=True))
+    if not (is_org or ext_id in owned):
+        return HttpResponse("no such project", status=404, content_type="text/plain")
+
+    data = results_svc.current_results(event)
+    if not data.get("published"):
+        return HttpResponse("results not published", status=404, content_type="text/plain")
+    result = data.get("result") or {}
+    row, next_title = explain_mod.find_row(result, ext_id)
+    if row is None:
+        return HttpResponse("no such project", status=404, content_type="text/plain")
+
+    explanation = explain_mod.explain_row(
+        row, field_size=len(result.get("rows") or []),
+        n_boot=result.get("n_boot", 0), seed=data.get("seed", 0),
+        n_components=result.get("n_components", 1), next_title=next_title)
+    resp = render(request, "normalize/explain.html", {
+        "event": event, "data": data, "row": row, "explain": explanation,
+        "organizer_view": is_org and ext_id not in owned})
+    resp["Cache-Control"] = "private, no-store"
+    resp["Vary"] = "Cookie"
+    resp["X-Robots-Tag"] = "noindex, nofollow"
+    resp["Referrer-Policy"] = "same-origin"
+    return resp

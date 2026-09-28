@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Why you finished rank {{ explain.figures.rank }} · {{ event.name }}{% endblock %}
+{% block content %}
+<style>
+  .xr-lede h1{margin:0 0 6px}
+  .xr-chip{display:inline-block;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.9rem;
+    border:1px solid var(--line);border-radius:999px;padding:3px 12px;color:var(--accent-ink);margin:2px 6px 2px 0}
+  .xr-card{border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0;background:var(--card,#fff)}
+  .xr-card h2{margin:0 0 6px;font-size:1rem}
+  .xr-card p{margin:0 0 8px}
+  .xr-caveat{color:var(--muted);font-size:.9rem;margin:0}
+  .xr-note{color:#8a5a00;background:#fbf0d8;border-radius:8px;padding:8px 12px;font-size:.9rem;margin:8px 0 0}
+  table.xr{border-collapse:collapse;width:100%;margin:8px 0 4px;font-size:.92rem}
+  table.xr th,table.xr td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left}
+  table.xr th{color:var(--muted);font-weight:600;font-size:.76rem;text-transform:uppercase;letter-spacing:.03em}
+  table.xr td.num{text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .xr-foot{color:var(--muted);font-size:.88rem;margin:14px 0 0}
+  .xr-foot a{color:var(--accent-ink)}
+</style>
+
+<div class="lede xr-lede">
+  <h1>Why you finished rank {{ explain.figures.rank }}</h1>
+  <p>A plain-language reading of your project’s place in the published results for
+     {{ event.name }}. Every number here is taken straight from the signed run
+     (version {{ data.version }}) shown on the
+     <a href="{% url 'normalize:results' %}">official results page</a> — this page interprets
+     those figures, it does not recompute anything.</p>
+</div>
+
+{% if organizer_view %}
+<p class="notice">You’re viewing this as an organizer. Participants see this page only for their
+  own team’s projects.</p>
+{% endif %}
+
+<p>
+  <span class="xr-chip">{{ row.title }}</span>
+  <span class="xr-chip">{{ row.track }}</span>
+  <span class="xr-chip">rank {{ explain.figures.rank }} of {{ explain.figures.field_size }}</span>
+</p>
+
+<div class="xr-card">
+  <h2>Where you placed</h2>
+  <p>{{ explain.interval.headline }}</p>
+  <p class="xr-caveat">{{ explain.interval.caveat }}</p>
+</div>
+
+<div class="xr-card">
+  <h2>How severity adjustment moved your score</h2>
+  <p>{{ explain.severity.headline }}</p>
+  {% if explain.severity.small_sample %}<p class="xr-note">{{ explain.severity.small_sample_note }}</p>{% endif %}
+  <p class="xr-caveat">{{ explain.severity.caveat }}</p>
+</div>
+
+{% if explain.adjacent %}
+<div class="xr-card">
+  <h2>You versus the project just below you</h2>
+  <p>{{ explain.adjacent.headline }}</p>
+  <p class="xr-caveat">{{ explain.adjacent.caveat }}</p>
+</div>
+{% endif %}
+
+{% if explain.component_note %}
+<div class="xr-card">
+  <h2>A note on comparability</h2>
+  <p class="xr-caveat">{{ explain.component_note }}</p>
+</div>
+{% endif %}
+
+<div class="xr-card">
+  <h2>Your figures at a glance</h2>
+  <table class="xr">
+    <tbody>
+      <tr><th>Rank</th><td class="num">{{ explain.figures.rank }} of {{ explain.figures.field_size }}</td></tr>
+      <tr><th>Could finish</th><td class="num">{{ explain.interval.lo }}&#8211;{{ explain.interval.hi }}</td></tr>
+      <tr><th>Adjusted quality (q, 0&#8211;5)</th><td class="num">{{ explain.figures.q }}</td></tr>
+      <tr><th>Raw average (0&#8211;5)</th><td class="num">{{ explain.figures.raw_mean }}</td></tr>
+      <tr><th>Severity adjustment (Δ)</th><td class="num">{{ explain.figures.delta }}</td></tr>
+      <tr><th>Reviews counted</th><td class="num">{{ explain.figures.n_ballots }}</td></tr>
+      {% if explain.figures.win_pct != None %}
+      <tr><th>Beats the next project in</th><td class="num">{{ explain.figures.win_pct }}% of resamples</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+  <p class="xr-caveat">These are the same signed figures shown publicly on the results page, rounded
+    here for reading. See <a href="{% url 'normalize:results' %}">the official results</a> or
+    <a href="{% url 'normalize:results_json' %}">results.json</a> for full precision.</p>
+</div>
+
+<p class="xr-foot">{{ explain.limitation }}</p>
+{% endblock %}

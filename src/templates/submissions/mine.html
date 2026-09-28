@@ -26,6 +26,11 @@
               <span class="tag">{{ s.state }}</span>
             {% endif %}
           </div>
+          {% if event.results_published and s.state != withdrawn_state %}
+            <div class="meta" style="margin-top:8px">
+              <a class="chip" href="{% url 'normalize:explain_rank' s.ext_id %}">Explain my rank</a>
+            </div>
+          {% endif %}
           {% if s.state != withdrawn_state and open %}
             <div class="meta" style="margin-top:12px">
               <a class="chip" href="/submissions/{{ s.ext_id }}/edit">Edit</a>
