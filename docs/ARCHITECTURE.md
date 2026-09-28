@@ -76,8 +76,10 @@ URL but not linked from `base.html`.
 | GET        | `/normalize/results`, `/normalize/results.json` | `normalize.views` | **public** (frozen signed result) |
 | POST       | `/normalize/results/publish`  | `normalize.views`           | organizer |
 | GET        | `/normalize/diagnostics`, `.json` | `normalize.views`       | organizer |
+| GET        | `/normalize/pairwise`         | `normalize.views`           | organizer; **live** pairwise-sensitivity recompute (never signed/published) |
 | GET        | `/api/v1/events/`, `/api/v1/events/<ext_id>/` | `api.views`         | **public**, read-only; event metadata only (no memberships / PII) |
 | GET        | `/api/v1/events/<ext_id>/{tracks,teams,submissions,results}/` | `api.views` | **public**, read-only; submissions are **SUBMITTED-only**; results are the frozen signed run or `{"published": false}` |
+| GET        | `/api/v1/events/<ext_id>/certificate/` | `api.views`        | **public**, read-only; verifiable certificate over the frozen signed run, or `404` when unpublished |
 | GET        | `/api/v1/schema/`, `/api/v1/docs/` | `drf_spectacular` views     | **public**; OpenAPI 3 schema + self-hosted Swagger UI |
 
 Access control is **event-scoped**: roles come from the `EventMembership` table
@@ -197,6 +199,12 @@ Framework and documented by an OpenAPI 3 schema. It is `GET`-only **by construct
 - `events/<ext_id>/results/` — the official published ranking read **verbatim from the frozen, signed
   normalization run** (never a live recompute), or `{"published": false}` before an organizer
   publishes;
+- `events/<ext_id>/certificate/` — a self-contained **verifiable certificate** over that same frozen,
+  signed run (result hash, signer fingerprint, public key, Ed25519 signature, the exact signed fields,
+  and the public rank/title/q), or `404` when the event has no published results. It introduces no new
+  key or signature scheme — `normalize.certificate` restates and re-checks the run that
+  `normalize.signing` already signed — and carries the same published-safe, no-PII fields as the
+  results endpoint;
 - `schema/` and `docs/` — the OpenAPI 3 schema and a self-hosted (no-CDN) Swagger UI.
 
 Each serializer declares its fields as an explicit allowlist (never `fields = "__all__"`), so no
@@ -258,6 +266,8 @@ means the model/service may exist but no endpoint wires it yet.
 | **Single-use invitations** | **Shipped** — an organizer mints a signed, single-use invite; redeeming it is Ed25519-verified, single-use (DB-enforced under `select_for_update`), rate-limited, and atomically creates an `EventMembership` + `invite.redeemed` audit event. Roles are limited to judge/participant, so a link can never escalate to organizer | `src/events/{models,invite_signing,services,views,urls}.py`, `migrations/0002_invite`, `templates/events/{detail,redeem}.html`, `manage.py invite_verify`; `GET`/`POST` `/events/invite/<ext_id>` |
 | **App models in Django admin** | **Shipped** — all 18 models registered; append-only/signed tables (audit, ballots, revisions, runs, publications) are inspect-only, the signed `Invite` table is likewise inspect-only with adding disabled (delete-to-revoke an un-redeemed link is still allowed), and any row whose cascade would reach a **scored** assignment (the assignment itself, or a parent `Event`/`EventMembership`/`Submission`/`Team`/`AppUser`) refuses deletion so ballot history can't be destroyed through the admin UI (raw-DB access is the A8 operator boundary) | `src/*/admin.py`, `src/portal/admin_mixins.py` |
 | **Read-only public API** (`GET /api/v1/*`) + OpenAPI 3 / Swagger | **Shipped** — unauthenticated, `GET`-only; events, tracks, teams, **SUBMITTED** submissions, and the **frozen signed** results (or `{"published": false}`); explicit-allowlist serializers (no ballots / per-judge scores / judge identity / invites / audit chain / PII), page-bounded + fail-open throttled | `src/api/*`, `src/portal/urls.py`, `tests/test_api_contract.py` |
+| **Verifiable results certificate** (`GET /api/v1/events/<id>/certificate/` + `manage.py certificate`) | **Shipped** — a self-contained attestation over the **frozen, signed** run (result hash, signer fingerprint, public key, Ed25519 signature, the signed fields, and the public rank/title/q); adds **no new key or signature scheme** (reuses `normalize.signing`) and no model/migration; refuses any non-published run; exposes no ballots / per-judge scores / judge identity / PII; the CLI self-verifies via the offline bundle verifier before it emits | `src/normalize/certificate.py`, `src/normalize/management/commands/certificate.py`, `src/api/*`, `tests/test_certificate.py`, `src/api/test_certificate.py` |
+| **Pairwise-sensitivity view** (`GET /normalize/pairwise`) | **Shipped** — organizer-only; the model-based P(one project outranks another) from the **same** bootstrap as the leaderboard's rank intervals, flagging every adjacent pair inside the pre-registered unresolved band; a **live recompute**, prominently labelled *not signed, not published, not a merit score, not fraud detection*; behind the same organizer gate as the leaderboard, and never rendered on the public results page | `src/normalize/{services,views,urls}.py`, `templates/normalize/pairwise.html`, `src/normalize/tests.py` |
 | **Offline release-bundle regression test** | *Present but inert until seeded* — re-verifies a committed signed bundle and asserts a one-byte tamper is rejected; **module-skips until `tests/goldens/golden_bundle.json` is committed** | `tests/test_verifier_golden.py`, `tools/make_golden_bundle.py` |
 | **Multi-event support** | *Limitation by design* — uses the first event | `src/*/views.py` (`_current_event`) |
 

@@ -38,15 +38,25 @@ written to be checkable line-by-line against `src/`.
   `manage.py invite_verify`).
 - **Organizer CSV export** — organizers export scored ballots as CSV with spreadsheet
   formula-injection guarding at `GET /api/export.csv` (`src/judging/{views,services}.py`).
-- **Normalized results** — organizers see an embargoed leaderboard and score diagnostics; the
-  public sees only the frozen, signed result once published (`/normalize/…`,
-  `src/normalize/views.py`).
+- **Normalized results** — organizers see an embargoed leaderboard, per-rank credibility intervals,
+  and a **pairwise-sensitivity** view (the model-based probability that one project outranks another,
+  flagging every adjacent pair the data cannot resolve); these are clearly labelled *live recomputes*
+  and are never part of any signed or published result. The public sees only the frozen, signed result
+  once published (`/normalize/…`, `src/normalize/views.py`).
 - **Read-only public API** — a versioned, read-only REST API at `/api/v1/` serves public event,
   track, team, and **submitted** project data as JSON, plus the official **frozen, signed** results
   once published, with an OpenAPI 3 schema (`/api/v1/schema/`) and a self-hosted Swagger UI
   (`/api/v1/docs/`). It is unauthenticated and `GET`-only by construction — there are no write
   endpoints — and never exposes ballots, per-judge scores, judge identities, invitations, the audit
   chain, or user PII (`src/api/{views,serializers,urls}.py`).
+- **Verifiable results certificate** — for a published event, `GET /api/v1/events/<id>/certificate/`
+  (and the operator command `manage.py certificate`) returns a one-page, self-contained attestation
+  over the *frozen, signed* normalization run: the engine version, result hash, signer fingerprint,
+  public key, Ed25519 signature, the exact signed fields, and the public ranking (rank/title/q), plus
+  the offline commands to re-verify it. It adds no new key or signature scheme — it restates and
+  re-checks the run that `normalize.signing` already signed — carries no ballots, per-judge scores,
+  judge identities, or PII, and refuses to certify anything that is not published
+  (`src/normalize/certificate.py`, `src/api/views.py`).
 - **Real login / logout** with per-IP rate limiting, for humans self-hosting the portal
   (`/accounts/login/`, `/accounts/logout/`, `src/accounts/views.py`).
 - **Offline integrity verification** — the audit log, the normalization run, and a combined

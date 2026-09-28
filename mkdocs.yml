@@ -8,6 +8,7 @@ nav:
   - Architecture: ARCHITECTURE.md
   - Data model: DATA-MODEL.md
   - Judging: JUDGING.md
+  - Ablation: ABLATION.md
   - Threat model: THREAT-MODEL.md
 markdown_extensions:
   # Render ```mermaid blocks as diagrams (pymdownx ships with mkdocs-material).
