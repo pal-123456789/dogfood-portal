@@ -9,11 +9,14 @@ appends an immutable BallotRevision and chains an audit event in one atomic step
 editable admin rows would let an operator change a score without a revision or an audit trail, so
 both are registered inspect-only.
 """
+from django import forms
 from django.contrib import admin
 
 from portal.admin_mixins import ReadOnlyModelAdmin
 
 from .models import Ballot, BallotRevision, JudgeAssignment, RubricWeight
+
+import math
 
 
 @admin.register(JudgeAssignment)
@@ -53,8 +56,29 @@ class BallotRevisionAdmin(ReadOnlyModelAdmin):
     search_fields = ("ballot__assignment__submission__ext_id",)
 
 
+class RubricWeightForm(forms.ModelForm):
+    """Admin-side guard so a negative or non-finite weight is refused with a friendly validation
+    error instead of a raw IntegrityError from the DB CheckConstraint (the deep backstop). Mirrors
+    the set_rubric_weights service rule: a criterion may be 0 (dropped) but never negative, and NaN
+    or inf -- which a FloatField will otherwise accept -- are rejected here too.
+    """
+    class Meta:
+        model = RubricWeight
+        fields = "__all__"
+
+    def clean_weight(self):
+        w = self.cleaned_data.get("weight")
+        if w is None or not math.isfinite(w):
+            raise forms.ValidationError("Weight must be a finite number.")
+        if w < 0:
+            raise forms.ValidationError(
+                "Weight must be non-negative (a criterion may be 0 to drop it, never negative).")
+        return w
+
+
 @admin.register(RubricWeight)
 class RubricWeightAdmin(admin.ModelAdmin):
+    form = RubricWeightForm
     list_display = ("event", "criterion", "weight")
     list_filter = ("event",)
     search_fields = ("criterion",)

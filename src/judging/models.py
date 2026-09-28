@@ -96,7 +96,14 @@ class BallotRevision(models.Model):
 
 class RubricWeight(models.Model):
     """Organizer-configurable criterion weights; the seed installs equal weights, and the
-    weighted 0..5 score is derived from these (never hard-coded in the view)."""
+    weighted 0..5 score is derived from these (never hard-coded in the view).
+
+    Weight is bounded non-negative three ways, deepest last: the set_rubric_weights service
+    (rejects negative/NaN/inf and a zero sum), the admin form's clean_weight, and a DB
+    CheckConstraint(weight >= 0) so a value below zero cannot be persisted even by a writer that
+    bypasses the service. A single weight MAY be 0 (drop a criterion); the "not all zero" rule is
+    cross-row, enforced by the service and the engine's den==0 guard, not by this per-row check.
+    """
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="rubric_weights")
     criterion = models.CharField(max_length=32)
     weight = models.FloatField(default=1.0)
@@ -106,6 +113,8 @@ class RubricWeight(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["event", "criterion"],
                                     name="uniq_event_criterion"),
+            models.CheckConstraint(condition=models.Q(weight__gte=0),
+                                   name="ck_rubric_weight_nonneg"),
         ]
 
     def __str__(self):
