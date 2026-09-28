@@ -894,3 +894,63 @@ class FinalizationGovernanceUITests(TestCase):
         self.assertContains(resp, "already published")
         self.assertContains(resp, "v1")
 
+
+class PairwiseSensitivityUITests(TestCase):
+    """#83 -- the organizer-only pairwise-sensitivity panel: model-based P(A outranks B) for the top
+    contenders, computed from the SAME live parametric bootstrap as the leaderboard's rank intervals.
+    Three properties are load-bearing: it renders for an organizer behind the leaderboard's own gate
+    and carries its honesty label; every probability is a valid [0, 1] number with P(i,j)+P(j,i) == 1
+    for a clear pair; and -- the anti-mislead assertion -- none of this pairwise content ever leaks
+    onto the public FROZEN results page, where it would masquerade as part of the signed result.
+    Reuses the perfectly-additive 3x3 fixture (prj_a first)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.event, cls.subs, cls.org = _seed_additive_event("pw")
+        cls.participant = User.objects.create_user(email="pwpart@t.demo", display_name="PWPart")
+        EventMembership.objects.create(user=cls.participant, event=cls.event,
+                                       role=EventMembership.PARTICIPANT)
+
+    def _key(self):
+        from audit import receipts
+        return receipts.generate_private_key()
+
+    def test_gate_matches_leaderboard(self):
+        self.assertEqual(Client().get("/normalize/pairwise").status_code, 401)
+        part = Client(); part.force_login(self.participant)
+        self.assertEqual(part.get("/normalize/pairwise").status_code, 403)
+
+    def test_organizer_sees_panel_and_honesty_label(self):
+        c = Client(); c.force_login(self.org)
+        resp = c.get("/normalize/pairwise")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, "normalize/pairwise.html")
+        self.assertContains(resp, "Pairwise sensitivity")                        # the panel is here
+        self.assertContains(resp, "outranks")                                    # the matrix caption
+        self.assertContains(resp, "not part of any signed or published result")  # the honesty label
+
+    def test_probabilities_valid_and_complementary(self):
+        report = services.pairwise_report(self.event)
+        k = report["top_k"]
+        self.assertGreaterEqual(k, 2)
+        self.assertEqual(len(report["labels"]), k)
+        for row in report["matrix"]:                       # every probability is a valid [0, 1] float
+            for p in row:
+                self.assertGreaterEqual(p, 0.0)
+                self.assertLessEqual(p, 1.0)
+        # A clear pair: prj_a (best q) vs prj_c (worst q). The complementary win-probs sum to 1.
+        p_ac = report["matrix"][0][k - 1]
+        p_ca = report["matrix"][k - 1][0]
+        self.assertAlmostEqual(p_ac + p_ca, 1.0, places=6)
+        self.assertGreater(p_ac, 0.9)
+
+    def test_pairwise_never_renders_on_public_results(self):
+        # Even after an OFFICIAL publish, the public frozen results page carries no pairwise content.
+        results.publish_results(self.event, key=self._key(), status=ResultPublication.FINAL,
+                                n_boot=120, seed=0)
+        resp = Client().get("/normalize/results")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Official</span>")            # it IS the official frozen page ...
+        self.assertNotContains(resp, "Pairwise sensitivity")    # ... and it has no pairwise panel
+        self.assertNotContains(resp, "outranks")
+

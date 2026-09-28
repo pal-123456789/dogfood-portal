@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Pairwise sensitivity · {{ event.name }}{% endblock %}
+{% block content %}
+{% include "normalize/_gov_banner.html" with state="live" live_published=live_published live_status=live_status live_version=live_version %}
+<style>
+  /* Inline styling only (CSP is script-src 'self'): no <script>, no external/CDN assets. The
+     heatmap is coloured entirely by the precomputed .hm* decile classes below. */
+  .pw-claim{border:1px solid #c4d5f0;background:#eaf0fb;border-radius:10px;padding:12px 15px;
+            margin:6px 0 16px;font-size:.9rem;line-height:1.5}
+  .diag{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 6px}
+  .diag .tag b{color:var(--ink)}
+  table.pw{border-collapse:collapse;margin:12px 0 18px;font-size:.86rem}
+  table.pw th,table.pw td{border:1px solid var(--line);padding:7px 9px;text-align:center;
+            font-family:ui-monospace,Menlo,Consolas,monospace}
+  table.pw th.rowh{text-align:left;font-family:inherit;font-weight:600;white-space:nowrap;max-width:280px}
+  table.pw th{color:var(--muted);font-weight:600}
+  table.pw th.rowh .ci{color:var(--muted);font-size:.8rem}
+  table.pw td.diag{background:var(--chip)}
+  .hm0{background:#eef4f2}.hm1{background:#dcebe6}.hm2{background:#c7e1d7}.hm3{background:#addbcb}
+  .hm4{background:#8fd0bb}.hm5{background:#6bc3a8}.hm6{background:#45b492;color:#fff}
+  .hm7{background:#28a07d;color:#fff}.hm8{background:#1a8768;color:#fff}.hm9{background:#116e55;color:#fff}
+  .hm10{background:#0a5a4d;color:#fff}
+  table.pw td.unres{box-shadow:inset 0 0 0 2px #b8860b}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:.8rem;color:var(--muted);margin:2px 0 30px}
+  .legend .ramp{display:flex;border:1px solid var(--line)}
+  .legend .ramp span{width:20px;height:14px;display:inline-block}
+  .legend .tiekey{box-shadow:inset 0 0 0 2px #b8860b;padding:1px 8px;border-radius:4px}
+</style>
+<div class="lede">
+  <h1>Pairwise sensitivity</h1>
+  <p>How robust is each ordering? Model-based probability that one top contender outranks another.
+     Organizer view.</p>
+</div>
+
+<p class="pw-claim">This panel is a <b>live recompute</b> over the current ballots —
+<b>not part of any signed or published result</b>. Each probability is the fraction of the
+<b>same parametric bootstrap draws</b> the leaderboard's rank intervals use in which the row
+project's severity-adjusted quality <b>q</b> exceeds the column project's. It measures only how
+stable an ordering is under sampling noise — <b>not</b> merit, and <b>not</b> fraud detection.</p>
+
+{% if grid %}
+<div class="diag">
+  <span class="tag">contenders <b>{{ report.top_k }}</b></span>
+  <span class="tag">bootstrap draws <b>{{ report.n_boot }}</b></span>
+  <span class="tag">unresolved pairs <b>{{ report.unresolved_pairs|length }}</b></span>
+</div>
+<p class="notice">Cell (row, column) = P(row&nbsp;outranks&nbsp;column) as a percentage, from the live
+bootstrap. The diagonal is blank. A cell is <b>highlighted</b> (gold outline, marked ≈) when the
+pair is <b>unresolved</b> — the win probability falls in the 10%–90% band <i>or</i> the quality gap
+Δq is under 0.25 — the same pre-registered band the leaderboard flags as a tie. Read a highlighted
+pair as an order the data does not resolve, not a settled ranking.</p>
+<table class="pw">
+  <thead><tr>
+    <th class="rowh">Row outranks column →</th>
+    {% for label in report.labels %}<th title="{{ label }}">{{ forloop.counter }}</th>{% endfor %}
+  </tr></thead>
+  <tbody>
+  {% for row in grid %}
+    <tr>
+      <th class="rowh">{{ row.rank }}. {{ row.label }}</th>
+      {% for cell in row.cells %}
+        {% if cell.diag %}<td class="diag"></td>
+        {% else %}<td class="hm{{ cell.bucket }}{% if cell.unresolved %} unres{% endif %}"
+            title="P(row outranks column) = {{ cell.pct }}%{% if cell.unresolved %} (unresolved){% endif %}">{{ cell.pct }}%{% if cell.unresolved %} ≈{% endif %}</td>{% endif %}
+      {% endfor %}
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<div class="legend">
+  <span>less likely</span>
+  <span class="ramp"><span class="hm0"></span><span class="hm2"></span><span class="hm4"></span><span class="hm6"></span><span class="hm8"></span><span class="hm10"></span></span>
+  <span>more likely row outranks column</span>
+  <span class="tiekey">≈ unresolved (read as a tie)</span>
+</div>
+<p class="notice">Columns are numbered in the same normalized rank order as the rows. Machine order
+matches the <a href="{% url 'normalize:leaderboard' %}">leaderboard</a>; publishing freezes that
+ranking but never freezes this live view.</p>
+{% else %}
+<p class="notice">No ballots recorded yet — the pairwise sensitivity matrix appears once judging
+begins.</p>
+{% endif %}
+{% endblock %}

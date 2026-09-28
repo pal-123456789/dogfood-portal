@@ -48,6 +48,30 @@ def _result_state(data):
     return "official" if data.get("status") == ResultPublication.FINAL else "provisional"
 
 
+def _pairwise_grid(report):
+    """Adapt services.pairwise_report() into rows of pre-shaded cells for the template.
+
+    CSP is script-src 'self', so there is no JS to color a heatmap client-side: every cell's decile
+    bucket (0..10 -> the .hm* classes) is precomputed here. matrix[a][b] = P(row a outranks col b);
+    the diagonal is left blank and unresolved pairs (symmetric) are flagged.
+    """
+    unresolved = {tuple(p) for p in report.get("unresolved_pairs", [])}
+    rows = []
+    for a, (label, row) in enumerate(zip(report["labels"], report["matrix"])):
+        cells = []
+        for b, p in enumerate(row):
+            diag = a == b
+            flagged = (not diag) and ((a, b) in unresolved or (b, a) in unresolved)
+            cells.append({
+                "diag": diag,
+                "unresolved": flagged,
+                "pct": None if diag else int(round(p * 100)),
+                "bucket": 0 if diag else int(round(p * 10)),
+            })
+        rows.append({"rank": a + 1, "label": label, "cells": cells})
+    return rows
+
+
 def leaderboard(request):
     event, err = _gate(request)
     if err:
@@ -72,6 +96,30 @@ def leaderboard_json(request):
         msg, status = err
         return JsonResponse({"detail": msg}, status=status)
     return JsonResponse(services.leaderboard(event))
+
+
+def pairwise(request):
+    """Organizer-only pairwise-sensitivity workbench: the model-based probability that one top
+    contender outranks another, from the SAME live parametric bootstrap as the rank intervals.
+
+    Same 401/403/200 gate as leaderboard() (copied via _gate). It is a LIVE recompute over the
+    current ballots and is NEVER part of a signed or published result. Computes pairwise_report only
+    when the event has ballots (it self-short-circuits otherwise); an empty event renders a graceful
+    empty state. `live_*` mirror leaderboard() so the shared banner names any already-published run
+    truthfully rather than claiming nothing is published.
+    """
+    event, err = _gate(request)
+    if err:
+        msg, status = err
+        return HttpResponse(msg, status=status, content_type="text/plain")
+    report = services.pairwise_report(event)
+    grid = _pairwise_grid(report) if report.get("labels") else None
+    pub = results_svc.current_publication(event)
+    return render(request, "normalize/pairwise.html",
+                  {"event": event, "report": report, "grid": grid,
+                   "live_published": pub is not None,
+                   "live_status": pub.status if pub else "",
+                   "live_version": pub.version if pub else 0})
 
 
 def results(request):

@@ -8,6 +8,7 @@ app_name = "normalize"
 urlpatterns = [
     path("", views.leaderboard, name="leaderboard"),
     path("leaderboard.json", views.leaderboard_json, name="leaderboard_json"),
+    path("pairwise", views.pairwise, name="pairwise"),
     path("results", views.results, name="results"),
     path("results.json", views.results_json, name="results_json"),
     path("results/publish", views.results_publish, name="results_publish"),

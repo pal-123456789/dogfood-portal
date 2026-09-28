@@ -91,6 +91,10 @@ not resolve that order. Machine-readable: <a href="leaderboard.json">leaderboard
       Spearman(raw mean, normalized) = <b>{{ proof.spearman_raw_norm }}</b>;
       <b>{{ proof.ranks_changed }}</b> of {{ proof.n_submissions }} positions differ from the raw-mean
       order. Judge-severity spread across the panel: σ <b>{{ proof.raw_judge_spread }}</b>.</span></div>
+    <div class="row"><span class="lab">Pairwise sensitivity</span><span class="val">
+      Model-based P(A outranks B) for the top contenders, from this same live bootstrap —
+      see the <a href="{% url 'normalize:pairwise' %}">pairwise sensitivity</a> panel to tell robust
+      orderings from ties. Live recompute, not part of any signed or published result.</span></div>
   </div>
 </div>
 {% endif %}

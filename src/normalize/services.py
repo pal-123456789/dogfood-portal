@@ -149,6 +149,47 @@ def proof_report(event, n_boot=1000, seed=0):
     }
 
 
+def pairwise_report(event, n_boot=400, top_k=8, seed=0):
+    """Model-based P(A outranks B) for the top contenders -- a LIVE recompute, never signed.
+
+    Reuses the SAME parametric bootstrap as the leaderboard's rank intervals: engine.rank_report
+    already returns `win_prob`, the fraction of bootstrap draws in which q_i exceeds q_j (its exact
+    definition of "i outranks j"), so no new sampler and no new random model is introduced here. We
+    only reorder that matrix into current normalized rank order and keep the top_k rows.
+
+    Returns {labels, matrix, n_boot, top_k, unresolved_pairs}:
+      * labels -- "ext_id - title" for the top_k submissions, best-q first (the order the leaderboard
+        ranks by);
+      * matrix -- matrix[i][j] = P(labels[i] outranks labels[j]) in [0, 1]; the diagonal is 0.0;
+      * unresolved_pairs -- (i, j) with i < j whose order the data cannot resolve, using the SAME
+        pre-registered band the leaderboard uses: win-prob in engine.UNRESOLVED_PROB ([0.10, 0.90])
+        OR |q_i - q_j| < engine.UNRESOLVED_GAP (0.25);
+      * top_k -- the number of contenders actually shown (min of the requested top_k and the field).
+    Returns empty labels/matrix (no bootstrap run) when the event has no ballots yet, so the view can
+    render a graceful empty state.
+    """
+    y, jk, sk = observed(event)
+    if not y:
+        return {"labels": [], "matrix": [], "n_boot": n_boot, "top_k": 0, "unresolved_pairs": []}
+    rep = engine.rank_report(y, jk, sk, n_boot=n_boot, seed=seed)
+    subs, q, win = rep["subs"], rep["q"], rep["win_prob"]
+    order = sorted(range(len(subs)), key=lambda i: -float(q[i]))   # normalized rank order, best first
+    top = order[:top_k]
+    disp = _display(event)
+    labels = ["%s - %s" % (subs[i], disp.get(subs[i], (subs[i], ""))[0]) for i in top]
+    matrix = [[float(win[a][b]) for b in top] for a in top]
+    q_top = [float(q[i]) for i in top]
+    lo, hi = engine.UNRESOLVED_PROB
+    unresolved_pairs = [
+        (a, b)
+        for a in range(len(top))
+        for b in range(a + 1, len(top))
+        if (lo <= matrix[a][b] <= hi) or abs(q_top[a] - q_top[b]) < engine.UNRESOLVED_GAP
+    ]
+    return {"labels": labels, "matrix": matrix, "n_boot": rep["n_boot"],
+            "top_k": len(top), "unresolved_pairs": unresolved_pairs}
+
+
 def diagnostics_report(event, lam=None, seed=0):
     """Organizer review-diagnostics panel for the event (see normalize.diagnostics -- NOT fraud
     detection): leave-one-ballot-out residuals, single-ballot + single-judge decision influence,
