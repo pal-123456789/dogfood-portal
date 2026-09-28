@@ -348,3 +348,200 @@ class ControlRoomTests(TestCase):
         self.assertEqual(self.client.get(url).status_code, 403)
         self.client.force_login(self.org_u)
         self.assertEqual(self.client.get(url).status_code, 200)
+
+    # ---- #97 non-negative rubric weight: DB backstop + admin-form guard ----
+    def test_rubric_weight_negative_rejected_at_db(self):
+        # The service and the admin form reject a negative weight earlier; this proves the DB
+        # itself refuses one even when a writer bypasses both -- the deep backstop 0003 adds.
+        # A distinct criterion keeps the UNIQUE(event, criterion) rule out of the way, so the
+        # only thing that can fire is CheckConstraint(weight >= 0).
+        from django.db import IntegrityError, transaction
+        from judging.models import RubricWeight
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                RubricWeight.objects.create(event=self.event, criterion="ck_probe", weight=-0.5)
+
+    def test_rubric_weight_admin_form_validates_weight(self):
+        from events.models import Event
+        from judging.admin import RubricWeightForm
+        ev = Event.objects.create(ext_id="evt_w", name="W", state=Event.CLOSED,
+                                  submissions_close=timezone.now() - timedelta(days=1))
+
+        def form(w):
+            return RubricWeightForm(data={"event": ev.id, "criterion": "functionality", "weight": w})
+
+        self.assertFalse(form("-1").is_valid())     # negative rejected by clean_weight
+        self.assertTrue(form("0").is_valid())        # 0 allowed (a criterion may be dropped)
+        self.assertTrue(form("2.5").is_valid())      # positive ok
+
+
+# --- #92 adversarial integrity regression harness ------------------------------------------
+# Each foreign-event row planted below is a trap: an event-scoped reader that quietly stopped
+# filtering on the event -- or a dropped record_ballot same-event guard -- would surface it and
+# turn these assertions red. The harness therefore proves the isolation is load-bearing, not
+# merely present.
+
+class _TwoEventFixtureMixin:
+    """Two independent events so a cross-event read leak has somewhere to leak FROM. evt_a has
+    organizer org_a_u and judge ja1 with submissions sa1/sa2; evt_b has judge jb1 and submission
+    sb1. No actor of evt_a is an actor of evt_b, so any evt_a read that surfaces prj_iso_b1 has
+    crossed an event boundary it must not."""
+
+    def _build(self):
+        now = timezone.now()
+        self.evt_a = Event.objects.create(ext_id="evt_iso_a", name="A", state=Event.CLOSED,
+                                           submissions_close=now - timedelta(days=1))
+        self.evt_b = Event.objects.create(ext_id="evt_iso_b", name="B", state=Event.CLOSED,
+                                           submissions_close=now - timedelta(days=1))
+        self.trk_a = Track.objects.create(ext_id="trk_iso_a", event=self.evt_a, name="A")
+        self.tm_a = Team.objects.create(ext_id="tm_iso_a", event=self.evt_a, name="A")
+        self.trk_b = Track.objects.create(ext_id="trk_iso_b", event=self.evt_b, name="B")
+        self.tm_b = Team.objects.create(ext_id="tm_iso_b", event=self.evt_b, name="B")
+        self.sa1 = Submission.objects.create(ext_id="prj_iso_a1", event=self.evt_a, team=self.tm_a,
+                                             track=self.trk_a, title="A1",
+                                             state=Submission.SUBMITTED)
+        self.sa2 = Submission.objects.create(ext_id="prj_iso_a2", event=self.evt_a, team=self.tm_a,
+                                             track=self.trk_a, title="A2",
+                                             state=Submission.SUBMITTED)
+        self.sb1 = Submission.objects.create(ext_id="prj_iso_b1", event=self.evt_b, team=self.tm_b,
+                                             track=self.trk_b, title="B1",
+                                             state=Submission.SUBMITTED)
+        self.org_a_u = User.objects.create_user(email="orga_iso@x.com", password=None)
+        EventMembership.objects.create(user=self.org_a_u, event=self.evt_a,
+                                       role=EventMembership.ORGANIZER, ext_id="org_iso_a")
+        self.ja1_u = User.objects.create_user(email="ja1_iso@x.com", password=None)
+        self.ja1 = EventMembership.objects.create(user=self.ja1_u, event=self.evt_a,
+                                                  role=EventMembership.JUDGE, ext_id="jdg_iso_a1")
+        self.jb1_u = User.objects.create_user(email="jb1_iso@x.com", password=None)
+        self.jb1 = EventMembership.objects.create(user=self.jb1_u, event=self.evt_b,
+                                                  role=EventMembership.JUDGE, ext_id="jdg_iso_b1")
+
+    def _plant_cross_event_ballot(self):
+        """Force a cross-event Ballot into the DB via raw ORM (bypassing record_ballot's
+        same-event guard) so event-scoped readers have a foreign row to correctly exclude."""
+        bad = JudgeAssignment.objects.create(judge=self.ja1, submission=self.sb1)
+        return Ballot.objects.create(assignment=bad, functionality=5, quality=5, innovation=5)
+
+class CrossEventWriteGuardTests(_TwoEventFixtureMixin, TestCase):
+    """The write layer refuses to create a cross-event ballot or assignment -- the invariant the
+    membership-scoped judge read relies on."""
+
+    def setUp(self):
+        self._build()
+
+    def test_record_ballot_refuses_cross_event_submission(self):
+        with self.assertRaises(ValidationError):
+            services.record_ballot(self.ja1, self.sb1, functionality=3, quality=3, innovation=3)
+        # the guard fires before any write: no assignment, ballot, or audit row is left behind
+        self.assertFalse(
+            JudgeAssignment.objects.filter(judge=self.ja1, submission=self.sb1).exists())
+        self.assertEqual(Ballot.objects.count(), 0)
+        self.assertFalse(AuditEvent.objects.filter(event_type="ballot.recorded").exists())
+
+    def test_record_ballot_allows_same_event_submission(self):
+        # the guard must not over-block: scoring a submission of the judge's OWN event still works
+        ballot = services.record_ballot(self.ja1, self.sa1,
+                                        functionality=4, quality=4, innovation=4)
+        self.assertEqual(Ballot.objects.count(), 1)
+        self.assertEqual(ballot.assignment.submission.ext_id, "prj_iso_a1")
+
+    def test_assign_judge_refuses_cross_event_pairing(self):
+        with self.assertRaises(ValidationError):        # foreign submission
+            services.assign_judge(self.org_a_u, self.evt_a, judge_ext_id="jdg_iso_a1",
+                                  submission_ext_id="prj_iso_b1")
+        with self.assertRaises(ValidationError):        # foreign judge
+            services.assign_judge(self.org_a_u, self.evt_a, judge_ext_id="jdg_iso_b1",
+                                  submission_ext_id="prj_iso_a1")
+        self.assertEqual(JudgeAssignment.objects.count(), 0)
+
+class CrossEventReadScopingTests(_TwoEventFixtureMixin, TestCase):
+    """Event-scoped reads (CSV export, judging progress) exclude a planted foreign-event ballot;
+    the membership-scoped judge read is shown to rest on the write-layer guard above."""
+
+    def setUp(self):
+        self._build()
+        services.record_ballot(self.ja1, self.sa1, functionality=4, quality=4, innovation=4)
+        services.record_ballot(self.ja1, self.sa2, functionality=3, quality=3, innovation=3)
+        self._plant_cross_event_ballot()               # ja1 -> sb1, a trap living in evt_b
+
+    def test_export_rows_are_event_scoped(self):
+        blob_a = "\n".join(",".join(str(c) for c in r)
+                           for r in services.export_event_rows(self.evt_a))
+        self.assertIn("prj_iso_a1", blob_a)
+        self.assertNotIn("prj_iso_b1", blob_a)         # foreign row never leaks into evt_a export
+        blob_b = "\n".join(",".join(str(c) for c in r)
+                           for r in services.export_event_rows(self.evt_b))
+        self.assertIn("prj_iso_b1", blob_b)
+        self.assertNotIn("prj_iso_a1", blob_b)
+
+    def test_progress_is_event_scoped(self):
+        prog = services.judging_progress(self.evt_a)
+        sub_ids = {getattr(r["submission"], "ext_id", r["submission"]) for r in prog["sub_rows"]}
+        self.assertEqual(sub_ids, {"prj_iso_a1", "prj_iso_a2"})
+        self.assertEqual(prog["totals"]["submissions"], 2)
+
+    def test_judge_read_is_membership_scoped_and_upheld_by_write_guard(self):
+        # scores_for_judge filters by the judge's (event-bound) membership, not by an explicit
+        # event column, so its cross-event safety RESTS on there being no cross-event assignment
+        # for a membership. The trap (planted by raw ORM) shows the read trusts that invariant...
+        leaked = [r["submission"] for r in services.scores_for_judge(self.ja1)]
+        self.assertIn("prj_iso_b1", leaked)
+        # ...and the invariant is enforced -- neither service write path will create such a row,
+        # so the trap could only have appeared by bypassing the service entirely.
+        with self.assertRaises(ValidationError):
+            services.record_ballot(self.ja1, self.sb1, functionality=3, quality=3, innovation=3)
+        with self.assertRaises(ValidationError):
+            services.assign_judge(self.org_a_u, self.evt_a, judge_ext_id="jdg_iso_a1",
+                                  submission_ext_id="prj_iso_b1")
+
+class AdminDeleteMatrixTests(TestCase):
+    """The admin delete guards hold: a JudgeAssignment or AppUser that cascades into a scored
+    ballot cannot be deleted, and bulk delete_selected is dropped so it cannot bypass the
+    per-object check. Covers the previously-untested AppUser guard."""
+
+    def setUp(self):
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+        self.site = AdminSite()
+        self.factory = RequestFactory()
+        self.su = User.objects.create_user(email="su_adm@x.com", password="pw")
+        self.su.is_staff = True
+        self.su.is_superuser = True
+        self.su.save()
+        ev = Event.objects.create(ext_id="evt_adm", name="Adm", state=Event.CLOSED,
+                                  submissions_close=timezone.now() - timedelta(days=1))
+        trk = Track.objects.create(ext_id="trk_adm", event=ev, name="A")
+        tm = Team.objects.create(ext_id="tm_adm", event=ev, name="A")
+        sub1 = Submission.objects.create(ext_id="prj_adm1", event=ev, team=tm, track=trk,
+                                         title="A1", state=Submission.SUBMITTED)
+        sub2 = Submission.objects.create(ext_id="prj_adm2", event=ev, team=tm, track=trk,
+                                         title="A2", state=Submission.SUBMITTED)
+        self.judge_u = User.objects.create_user(email="jadm@x.com", password=None)
+        mem = EventMembership.objects.create(user=self.judge_u, event=ev,
+                                             role=EventMembership.JUDGE, ext_id="jdg_adm")
+        self.scored = JudgeAssignment.objects.create(judge=mem, submission=sub1)
+        services.record_ballot(mem, sub1, functionality=3, quality=3, innovation=3)
+        self.clean = JudgeAssignment.objects.create(judge=mem, submission=sub2)
+
+    def _req(self):
+        r = self.factory.get("/admin/")
+        r.user = self.su
+        return r
+
+    def test_judge_assignment_scored_delete_blocked(self):
+        from judging.admin import JudgeAssignmentAdmin
+        ma = JudgeAssignmentAdmin(JudgeAssignment, self.site)
+        req = self._req()
+        self.assertFalse(ma.has_delete_permission(req, self.scored))
+        self.assertTrue(ma.has_delete_permission(req, self.clean))
+        self.assertNotIn("delete_selected", ma.get_actions(req))
+
+    def test_app_user_with_scored_ballot_delete_blocked(self):
+        from accounts.admin import AppUserAdmin
+        from accounts.models import AppUser
+        ma = AppUserAdmin(AppUser, self.site)
+        req = self._req()
+        self.assertFalse(ma.has_delete_permission(req, self.judge_u))   # cascades into a scored ballot
+        clean_user = User.objects.create_user(email="cleanadm@x.com", password=None)
+        self.assertTrue(ma.has_delete_permission(req, clean_user))
+        self.assertNotIn("delete_selected", ma.get_actions(req))

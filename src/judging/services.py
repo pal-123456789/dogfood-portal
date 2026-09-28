@@ -89,7 +89,15 @@ def record_ballot(membership, submission, *, functionality, quality, innovation,
     backstop; the audit-head lock in record_event already serializes the common path), and a
     tamper-evident `ballot.recorded` audit event carrying that version is chained. A score can
     never be persisted without both its history row and its audit row, nor vice versa.
+
+    A ballot must also never span two events: the submission has to belong to the judge
+    membership's own event. assign_judge already refuses a cross-event pairing, and the score
+    view only ever reaches an already-assigned submission, but enforcing the invariant here --
+    at the single score writer -- means no caller can create a cross-event JudgeAssignment that
+    the membership-scoped scores_for_judge read would then trust.
     """
+    if submission.event_id != membership.event_id:
+        raise ValidationError("submission does not belong to this judge's event")
     for name, val in (("functionality", functionality),
                       ("quality", quality), ("innovation", innovation)):
         try:

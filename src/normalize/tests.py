@@ -732,3 +732,103 @@ class ReleaseVerifyPureTests(SimpleTestCase):
         self.assertEqual(release.ranking_csv({"rows": []}), header)   # header-only when empty
         self.assertEqual(release.ranking_csv(result), release.ranking_csv(result))  # deterministic
 
+
+# --- #92/#93 finalization boundary + withdrawal-propagation pins ---------------------------
+
+def _seed_additive_event(prefix):
+    """The additive 3x3 event (prj_a>prj_b>prj_c, three equal-weight judges biased 0/+1/-1) plus
+    an organizer. Returns (event, subs_by_id, organizer_user)."""
+    ev = Event.objects.create(ext_id="evt_%s" % prefix, name=prefix, state=Event.CLOSED,
+                              submissions_close=timezone.now() - timezone.timedelta(days=1))
+    trk = Track.objects.create(ext_id="trk_%s" % prefix, event=ev, name=prefix)
+    tm = Team.objects.create(ext_id="tm_%s" % prefix, event=ev, name="Team")
+    for c in engine.CRITERIA:
+        RubricWeight.objects.create(event=ev, criterion=c, weight=1.0)
+    subs = {}
+    for sid in ("prj_a", "prj_b", "prj_c"):
+        subs[sid] = Submission.objects.create(ext_id=sid, event=ev, team=tm, track=trk,
+                                              title="Title %s" % sid, state=Submission.SUBMITTED)
+    base = {"prj_a": 4, "prj_b": 3, "prj_c": 2}
+    bias = [0, 1, -1]
+    for n in range(3):
+        u = User.objects.create_user(email="%sjudge%d@t.demo" % (prefix, n),
+                                     display_name="%sJ%d" % (prefix, n))
+        m = EventMembership.objects.create(user=u, event=ev, role=EventMembership.JUDGE,
+                                           ext_id="jdg_%s%d" % (prefix, n))
+        for sid, sub in subs.items():
+            a = JudgeAssignment.objects.create(judge=m, submission=sub)
+            v = base[sid] + bias[n]
+            Ballot.objects.create(assignment=a, functionality=v, quality=v, innovation=v)
+    org = User.objects.create_user(email="%sorg@t.demo" % prefix, display_name="%sOrg" % prefix)
+    EventMembership.objects.create(user=org, event=ev, role=EventMembership.ORGANIZER)
+    return ev, subs, org
+
+class FrozenVsLiveDivergenceTests(TestCase):
+    """Finalization boundary: once results are published the PUBLIC result is a frozen snapshot
+    read verbatim from the signed run. A later reweight or a new ballot recomputes the organizer
+    LIVE leaderboard but never moves the published result_hash or result dict."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.event, cls.subs, cls.org = _seed_additive_event("frz")
+
+    def setUp(self):
+        from audit import receipts
+        self.key = receipts.generate_private_key()
+        self.pub, self.run = results.publish_results(
+            self.event, key=self.key, note="Final.", n_boot=120, seed=0)
+
+    def test_published_result_is_frozen_against_a_later_reweight(self):
+        from judging.services import set_rubric_weights, current_weights
+        frozen = results.current_results(self.event)
+        self.assertTrue(frozen["published"])
+        hash_before, result_before = frozen["result_hash"], frozen["result"]
+        set_rubric_weights(self.org, self.event,
+                           weights={"functionality": 5.0, "quality": 1.0, "innovation": 1.0})
+        self.assertEqual(current_weights(self.event)["functionality"], 5.0)   # config did change
+        again = results.current_results(self.event)
+        self.assertEqual(again["result_hash"], hash_before)     # published run untouched
+        self.assertEqual(again["result"], result_before)        # byte-identical frozen snapshot
+
+    def test_new_ballot_moves_live_leaderboard_but_not_published_run(self):
+        from judging.services import record_ballot
+        frozen = results.current_results(self.event)
+        hash_before = frozen["result_hash"]
+        frozen_n = frozen["result"]["n_ballots"]
+        self.assertEqual(services.leaderboard(self.event)["n_ballots"], frozen_n)  # equal at publish
+        u = User.objects.create_user(email="frzlate@t.demo", display_name="Late")
+        m = EventMembership.objects.create(user=u, event=self.event,
+                                           role=EventMembership.JUDGE, ext_id="jdg_frzlate")
+        for sub in self.subs.values():
+            record_ballot(m, sub, functionality=1, quality=1, innovation=1)
+        self.assertEqual(services.leaderboard(self.event)["n_ballots"], frozen_n + 3)  # live moves
+        after = results.current_results(self.event)
+        self.assertEqual(after["result_hash"], hash_before)              # still frozen
+        self.assertEqual(after["result"]["n_ballots"], frozen_n)
+
+class WithdrawnStillCountsInScoringTests(TestCase):
+    """Withdrawal is soft and changes ONLY gallery visibility: a withdrawn-but-scored submission
+    still counts in the live leaderboard, in a new signed run's inputs, and in the organizer CSV.
+    Pins that real behavior so it is stated honestly rather than assumed to disappear."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.event, cls.subs, cls.org = _seed_additive_event("wd")
+
+    def test_withdrawn_scored_submission_still_scored_everywhere_but_gallery(self):
+        from judging.services import export_event_rows
+        sub_c = self.subs["prj_c"]
+        sub_c.state = Submission.WITHDRAWN
+        sub_c.save(update_fields=["state"])
+        # live leaderboard still ranks it; its three ballots still count
+        live = services.leaderboard(self.event)
+        self.assertIn("prj_c", {r["submission"] for r in live["rows"]})
+        self.assertEqual(live["n_ballots"], 9)
+        # a NEW signed run still reads its ballots into inputs
+        from audit import receipts
+        run = runs.build_run(self.event, key=receipts.generate_private_key(), n_boot=120, seed=0)
+        self.assertIn("prj_c", {b["submission"] for b in run["inputs"]["ballots"]})
+        # the organizer CSV export still includes it
+        blob = "\n".join(",".join(str(c) for c in r) for r in export_event_rows(self.event))
+        self.assertIn("prj_c", blob)
+
