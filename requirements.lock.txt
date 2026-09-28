@@ -2,6 +2,9 @@ asgiref==3.12.1
 cffi==2.1.1
 cryptography==45.0.7
 Django==5.2.17
+djangorestframework==3.16.0
+drf-spectacular==0.28.0
+drf-spectacular-sidecar==2026.8.1
 gunicorn==23.0.0
 iniconfig==2.3.0
 numpy==2.5.3

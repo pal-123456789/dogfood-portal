@@ -28,6 +28,9 @@ INSTALLED_APPS = [
     "django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes",
     "django.contrib.sessions", "django.contrib.messages", "django.contrib.staticfiles",
     "accounts", "audit", "events", "submissions", "judging", "normalize", "gallery",
+    # Read-only public API (/api/v1/): DRF + drf-spectacular OpenAPI 3 schema/docs. Self-hosted
+    # Swagger UI assets via sidecar (no CDN). `api` has no models, so no migration is added.
+    "rest_framework", "drf_spectacular", "drf_spectacular_sidecar", "api",
 ]
 
 MIDDLEWARE = [                                                  # §6: this order, all stock
@@ -121,4 +124,39 @@ DOGFOOD_RATE_LIMITS = {                       # [T-0] names follow THREAT-MODEL 
     "invite_redeem": os.environ.get("DOGFOOD_RATE_INVITE_REDEEM", "20/h"),
     "submission_write": os.environ.get("DOGFOOD_RATE_SUBMISSION_WRITE", "60/h"),
     "ballot_write": os.environ.get("DOGFOOD_RATE_BALLOT_WRITE", "120/h"),
+}
+
+# --- Read-only public API (/api/v1/) -------------------------------------------------------
+# DRF is configured PUBLIC and read-only: no authentication classes and AllowAny, so there is no
+# auth surface to get wrong and nothing here can expose a logged-in user's data. Responses are
+# JSON only (the browsable API is off in every environment). PageNumberPagination sets PAGE_SIZE
+# so `manage.py check --fail-level WARNING` (a build gate) stays warning-clean. The anon throttle
+# FAILS OPEN (api/throttling.py) so a cache outage -- or the missing `dogfood_cache` table under
+# `manage.py test` -- can never 500 the API.
+REST_FRAMEWORK = {
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_AUTHENTICATION_CLASSES": [],
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
+    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 50,
+    "DEFAULT_THROTTLE_CLASSES": ["api.throttling.FailOpenAnonThrottle"],
+    "DEFAULT_THROTTLE_RATES": {"anon": os.environ.get("DOGFOOD_RATE_API", "240/min")},
+}
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "DOGFOOD public API",
+    "DESCRIPTION": (
+        "Read-only public access to events, tracks, teams, public (SUBMITTED) project "
+        "submissions, and official PUBLISHED results. Results are served verbatim from the "
+        "signed, frozen normalization run -- never a live recompute -- and an unpublished event "
+        "returns {\"published\": false} with no ranking rows. This API never exposes individual "
+        "ballots, per-judge scores, judge identities, invitations, the audit chain, or any user "
+        "PII (no emails or display names)."
+    ),
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    # Self-hosted Swagger UI assets (no CDN), so the docs page honors the site's script-src 'self'.
+    "SWAGGER_UI_DIST": "SIDECAR",
+    "SWAGGER_UI_FAVICON_HREF": "SIDECAR",
 }

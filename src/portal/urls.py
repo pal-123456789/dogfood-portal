@@ -25,4 +25,10 @@ urlpatterns = [
     path("submissions/", include("submissions.urls")),
     path("judging/", include("judging.urls")),
     path("normalize/", include("normalize.urls")),
+
+    # Read-only public REST API (/api/v1/) + OpenAPI schema & Swagger docs. Appended AFTER the
+    # five flat checker routes above and not linked from base.html, so replay stays 7/7. The
+    # `api/v1/` prefix cannot shadow the flat `api/judge/scores` / `api/export.csv` routes, which
+    # are matched earlier and require different path segments.
+    path("api/v1/", include("api.urls")),
 ]

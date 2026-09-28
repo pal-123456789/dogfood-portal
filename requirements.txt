@@ -7,3 +7,10 @@ numpy>=1.26,<3            # numpy.linalg only, for the 70x70 dense ridge solve. 
 cryptography>=42,<46      # Ed25519 audit checkpoints. manylinux wheel (Rust prebuilt) -> no gcc.
 pytest>=7.4,<9
 pytest-django>=4.7,<5
+
+# Read-only public API (/api/v1/). Exact pins (== not ranges) for the DRF stack as required;
+# pip resolves their transitive deps (PyYAML, inflection, jsonschema, uritemplate) -- all pure
+# wheels, so python:3.12-slim still needs no compiler.
+djangorestframework==3.16.0        # 3.16 is the first release to officially support Django 5.2 LTS.
+drf-spectacular==0.28.0            # OpenAPI 3 schema at /api/v1/schema/, Swagger UI at /api/v1/docs/.
+drf-spectacular-sidecar==2026.8.1  # self-hosted Swagger UI assets (no CDN; honors script-src 'self').
