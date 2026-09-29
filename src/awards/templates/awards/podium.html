@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Awards · {{ event.name }}{% endblock %}
+{% block content %}
+<style>
+  .aw-note{color:var(--muted);font-size:.86rem;margin:.2rem 0 0}
+  table.aw{border-collapse:collapse;width:100%;margin:14px 0 26px;font-size:.94rem}
+  table.aw th,table.aw td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left}
+  table.aw th{color:var(--muted);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.03em}
+  table.aw td.num{text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .aw-place{color:var(--accent-ink);font-weight:700}
+  .aw-prize{padding:12px 14px;border:1px solid var(--line);border-radius:10px;margin:10px 0;background:var(--card)}
+  .aw-prize h3{margin:0 0 4px;font-size:1rem}
+  .aw-win{margin:.2rem 0 0}
+  .aw-src{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+</style>
+<div class="lede">
+  <h1>Awards &amp; podium</h1>
+  <p>Recognition for {{ event.name }}. The podium below is derived from the frozen, signed judged
+     result; the awards layer records recognitions and is not itself a signed artifact, and it never
+     changes the judged ranking.</p>
+</div>
+
+{% if not published %}
+  <p class="notice">Results are not yet published for this event. The podium and prize winners will
+     appear here once the organizer publishes the official, signed results.</p>
+{% else %}
+  <p class="aw-note">Derived from published result v{{ version }} ({{ status }}) ·
+     signed result hash <span class="mono">{{ result_hash }}</span>. Values are copied from the
+     frozen, signed run — no per-judge scores or judge identities are shown.</p>
+
+  {% if prizes %}
+  <h2>Prizes</h2>
+  {% for p in prizes %}
+    <div class="aw-prize">
+      <h3>{{ p.name }}{% if p.track %} <span class="tag">{{ p.track }}</span>{% endif %}</h3>
+      {% if p.description %}<p class="aw-note">{{ p.description }}</p>{% endif %}
+      {% if p.winner %}
+        <p class="aw-win"><strong>{{ p.winner.title }}</strong>
+           <span class="mono">{{ p.winner.submission }}</span>
+           {% if p.winner.team %}— {{ p.winner.team }}{% endif %}
+           {% if p.winner.place %}· podium place {{ p.winner.place }}{% endif %}</p>
+        <p class="aw-src">
+          {% if p.winner_source == "assigned" %}organizer-selected{% else %}derived from the signed result{% endif %}</p>
+      {% else %}
+        <p class="aw-win aw-note">Winner not yet decided.</p>
+      {% endif %}
+    </div>
+  {% endfor %}
+  {% endif %}
+
+  <h2>Podium</h2>
+  {% if podium %}
+  <table class="aw">
+    <thead><tr><th>Place</th><th>Project</th><th>Team</th><th>Track</th><th>Score (q)</th></tr></thead>
+    <tbody>
+    {% for row in podium %}
+      <tr>
+        <td class="aw-place">{{ row.place }}</td>
+        <td>{{ row.title }} <span class="mono">{{ row.submission }}</span></td>
+        <td>{{ row.team }}</td>
+        <td>{{ row.track_name|default:row.track }}</td>
+        <td class="num">{{ row.q|floatformat:3 }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="aw-note">“Score (q)” is the published normalized quality from the signed result. The full
+     ranking, provenance and verification live on the official results page.</p>
+  {% else %}
+  <p class="empty">No ranked projects in the published result yet.</p>
+  {% endif %}
+{% endif %}
+{% endblock %}

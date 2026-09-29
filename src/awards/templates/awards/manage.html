@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Manage awards · {{ event.name }}{% endblock %}
+{% block content %}
+<style>
+  .aw-hint{color:var(--muted);font-size:.86rem;margin:.2rem 0 0}
+  table.aw{border-collapse:collapse;width:100%;margin:14px 0 26px;font-size:.92rem}
+  table.aw th,table.aw td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  table.aw th{color:var(--muted);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.03em}
+  .aw-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end}
+  .aw-actions form{display:flex;gap:6px;align-items:flex-end;margin:0}
+  .aw-inline{margin:0}
+</style>
+<div class="lede">
+  <h1>Manage awards</h1>
+  <p>Define prizes for {{ event.name }} and, optionally, pick winners. Awards are a recognition layer:
+     assigning a prize never changes the judged, signed results, and the public podium is derived
+     from the frozen, signed result.</p>
+</div>
+
+{% if error %}<div class="notice" style="border-color:#b23a3a;color:#8a2b2b">{{ error }}</div>{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+
+<h2>Add a prize</h2>
+<form class="stack" method="post" action="{% url 'awards:manage' event.ext_id %}">
+  {% csrf_token %}
+  <label for="name">Prize name</label>
+  <input id="name" name="name" type="text" maxlength="200" required value="{{ form.name }}">
+
+  <label for="position">Podium place</label>
+  <input id="position" name="position" type="number" min="0" value="{% if form.position %}{{ form.position }}{% else %}1{% endif %}">
+  <p class="aw-hint">1 = first place, 2 = second, and so on. Use 0 for a special, non-podium award
+     (its winner is only ever set explicitly below).</p>
+
+  <label for="track">Scope</label>
+  <select id="track" name="track">
+    <option value="">Event-wide</option>
+    {% for t in tracks %}
+      <option value="{{ t.ext_id }}" {% if form.track == t.ext_id %}selected{% endif %}>{{ t.name }}</option>
+    {% endfor %}
+  </select>
+
+  <label for="description">Description (optional)</label>
+  <textarea id="description" name="description" rows="2">{{ form.description }}</textarea>
+
+  <button type="submit">Create prize</button>
+</form>
+
+<h2>Prizes</h2>
+{% if prizes %}
+<table class="aw">
+  <thead><tr><th>Prize</th><th>Place</th><th>Scope</th><th>Winner</th><th>Actions</th></tr></thead>
+  <tbody>
+  {% for p in prizes %}
+    <tr>
+      <td>{{ p.name }}{% if p.description %}<div class="aw-hint">{{ p.description }}</div>{% endif %}</td>
+      <td>{% if p.position %}{{ p.position }}{% else %}special{% endif %}</td>
+      <td>{% if p.track %}{{ p.track.name }}{% else %}Event-wide{% endif %}</td>
+      <td>
+        {% if p.awarded_submission %}
+          {{ p.awarded_submission.title }} <span class="mono">{{ p.awarded_submission.ext_id }}</span>
+        {% else %}
+          <span class="aw-hint">— none assigned{% if p.position %} (derived from the signed result on the public page){% endif %}</span>
+        {% endif %}
+      </td>
+      <td>
+        <div class="aw-actions">
+          <form method="post" action="{% url 'awards:assign' event.ext_id p.ext_id %}">
+            {% csrf_token %}
+            <select name="submission" aria-label="Winning project for {{ p.name }}">
+              {% for s in submissions %}
+                <option value="{{ s.ext_id }}"{% if p.awarded_submission_id == s.id %} selected{% endif %}>{{ s.title }} ({{ s.ext_id }})</option>
+              {% endfor %}
+            </select>
+            <button type="submit">Assign</button>
+          </form>
+          <form method="post" action="{% url 'awards:clear' event.ext_id p.ext_id %}">
+            {% csrf_token %}<button type="submit">Clear</button>
+          </form>
+          <form method="post" action="{% url 'awards:remove' event.ext_id p.ext_id %}">
+            {% csrf_token %}<button type="submit">Remove</button>
+          </form>
+        </div>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No prizes defined yet. Add one above.</p>
+{% endif %}
+
+<p class="aw-hint">Public podium page: <span class="mono">/events/{{ event.ext_id }}/awards</span>.
+   It stays neutral until the official, signed results are published.</p>
+<p class="aw-hint">Planning aid: <a href="{% url 'awards:topup' event.ext_id %}">review top-up</a> —
+   from the live, unsigned standings, see where a few more reviews would most reduce uncertainty at
+   each prize's cutoff before you finalize. It is not a score and not the final ranking.</p>
+{% endblock %}

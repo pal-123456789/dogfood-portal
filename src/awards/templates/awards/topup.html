@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Review top-up · {{ event.name }}{% endblock %}
+{% block content %}
+<style>
+  .aw-hint{color:var(--muted);font-size:.86rem;margin:.2rem 0 0}
+  .aw-note{color:var(--muted);font-size:.86rem;margin:.2rem 0 0}
+  table.aw{border-collapse:collapse;width:100%;margin:10px 0 4px;font-size:.92rem}
+  table.aw th,table.aw td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  table.aw th{color:var(--muted);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.03em}
+  table.aw td.num{text-align:right;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .aw-place{color:var(--accent-ink);font-weight:700}
+  .aw-prize{padding:12px 14px;border:1px solid var(--line);border-radius:10px;margin:12px 0;background:var(--card)}
+  .aw-prize h3{margin:0 0 4px;font-size:1rem}
+  .aw-why{margin:.15rem 0 0;padding:0;list-style:none}
+  .aw-why li{color:var(--muted);font-size:.82rem;margin:.1rem 0}
+  .aw-ok{color:var(--muted);font-size:.86rem;margin:.3rem 0 0}
+</style>
+<div class="lede">
+  <h1>Review top-up</h1>
+  <p>Where a few more reviews would most reduce uncertainty for {{ event.name }} before you finalize.
+     This reads the <strong>live, unsigned</strong> standings and, for each podium prize, flags the
+     contenders sitting at or straddling that prize's rank cutoff. It is a pre-finalization planning
+     aid — not a score, not the final ranking, and not fraud detection. The official podium is always
+     derived from the signed result once you publish.</p>
+</div>
+
+<p class="aw-note">Recorded reviews across the event: <strong>{{ n_ballots }}</strong> ·
+   coverage target {{ min_ballots }} per project. Live values change as reviews arrive.</p>
+
+{% if n_ballots == 0 %}
+  <p class="notice">No reviews have been recorded yet, so there is nothing to plan. Once judges begin
+     submitting reviews, this page will highlight the closest prize boundaries.</p>
+{% elif not lines %}
+  <p class="empty">No podium prizes are defined yet. Add a prize with a podium place on the
+     <a href="{% url 'awards:manage' event.ext_id %}">manage awards</a> page and it will appear here.</p>
+{% else %}
+  {% for line in lines %}
+    <div class="aw-prize">
+      <h3>{{ line.prize|default:"(unnamed prize)" }}
+        {% if line.track_name %}<span class="tag">{{ line.track_name }}</span>{% endif %}</h3>
+      <p class="aw-note">Targets podium place {{ line.position }} · cutoff at {{ line.boundary }} ·
+         pool of {{ line.pool_size }}
+         {% if line.track_name %}(within {{ line.track_name }}){% else %}(event-wide){% endif %}.</p>
+      {% if line.pool_size < line.position %}
+        <p class="aw-note">This place is deeper than the current field ({{ line.pool_size }}
+           project{{ line.pool_size|pluralize }}), so there is no cutoff to review yet.</p>
+      {% elif line.needs_review %}
+        <table class="aw">
+          <thead><tr><th>Place</th><th>Project</th><th>Reviews</th><th>Rank interval</th>
+                     <th>Score (q)</th><th>Why flagged</th></tr></thead>
+          <tbody>
+          {% for c in line.contenders %}
+            <tr>
+              <td class="aw-place">{{ c.place }}</td>
+              <td>{{ c.title|default:"—" }} <span class="mono">{{ c.submission }}</span></td>
+              <td class="num">{% if c.n_ballots is None %}—{% else %}{{ c.n_ballots }}{% endif %}</td>
+              <td class="num">{% if c.rank_lo and c.rank_hi %}{{ c.rank_lo }}–{{ c.rank_hi }}{% else %}—{% endif %}</td>
+              <td class="num">{% if c.q is None %}—{% else %}{{ c.q|floatformat:3 }}{% endif %}</td>
+              <td><ul class="aw-why">{% for r in c.reasons %}<li>{{ r }}</li>{% endfor %}</ul></td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="aw-ok">This boundary looks settled: every contender at the cutoff has enough
+           coverage and a clear margin. No extra reviews needed here right now.</p>
+      {% endif %}
+    </div>
+  {% endfor %}
+{% endif %}
+
+<p class="aw-hint">Back to <a href="{% url 'awards:manage' event.ext_id %}">manage awards</a>. This
+   planning view is organizer-only and is never part of the signed result.</p>
+{% endblock %}

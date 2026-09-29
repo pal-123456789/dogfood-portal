@@ -43,6 +43,9 @@ INSTALLED_APPS = [
     # DRF auth class. It ADDS the single authenticated endpoint /api/v1/me/; every other /api/v1/
     # route stays public/authless and byte-unchanged. Only a token's sha256 hash is stored.
     "apitokens",
+    # Awards & public podium: ships a Prize model + 0001 migration. The public podium derives
+    # places from the frozen, signed result; organizer manage/top-up never re-sign anything.
+    "awards",
 ]
 
 MIDDLEWARE = [                                                  # §6: this order, all stock

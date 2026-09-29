@@ -55,4 +55,8 @@ urlpatterns = [
     # leading segment, so neither can shadow an earlier route.
     path("bundles/", include("bundles.urls")),
     path("webhooks/", include("webhooks.urls")),
+    # Awards: organizer console + PUBLIC podium. The awards routes declare full
+    # events/<id>/awards paths, so this is a ROOT include appended LAST; gallery is empty
+    # and events raises Resolver404 for these paths, so nothing is shadowed, no flat route moves.
+    path("", include("awards.urls")),
 ]
