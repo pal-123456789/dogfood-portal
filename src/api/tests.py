@@ -19,6 +19,8 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import AppUser
+from apitokens import services as token_services
+from apitokens.models import ApiToken
 from audit import receipts
 from events.models import Event, EventMembership, Team, Track
 from judging.models import Ballot, JudgeAssignment, RubricWeight
@@ -160,3 +162,74 @@ class PublicApiTests(TestCase):
             self.client.get("/api/v1/events/evt_missing/submissions/").status_code, 404)
         self.assertEqual(
             self.client.get("/api/v1/events/evt_missing/results/").status_code, 404)
+
+
+@override_settings(CACHES=_LOCMEM)
+class MeEndpointAndBearerAuthTests(TestCase):
+    """Pins the ONE authenticated endpoint (/api/v1/me/) and proves the global Bearer auth class
+    leaves the public endpoints untouched: a valid token returns only the caller's own token
+    metadata + memberships (no email/display_name); missing/malformed/unknown/revoked tokens are
+    401; and a valid token does not change a public endpoint's bytes."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.event = Event.objects.create(ext_id="evt_me", name="me", state=Event.CLOSED,
+                                         submissions_close=timezone.now() - timedelta(days=1))
+        cls.user = AppUser.objects.create_user(email="me_judge@t.demo", display_name="MeJudge")
+        EventMembership.objects.create(user=cls.user, event=cls.event,
+                                       role=EventMembership.JUDGE, ext_id="jdg_me0")
+        cls.token, cls.raw = token_services.create_token(cls.user, "CI read-only")
+
+    def _me(self, raw):
+        return self.client.get("/api/v1/me/", HTTP_AUTHORIZATION="Bearer " + raw)
+
+    def test_valid_bearer_returns_own_identity_no_pii(self):
+        resp = self._me(self.raw)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data["authenticated"])
+        self.assertEqual(data["token"]["name"], "CI read-only")
+        self.assertEqual(data["token"]["prefix"], self.token.prefix)
+        self.assertEqual({m["ext_id"] for m in data["memberships"]}, {"jdg_me0"})
+        self.assertEqual(data["memberships"][0]["event"], "evt_me")
+        self.assertEqual(data["memberships"][0]["role"], "judge")
+        text = resp.content.decode("utf-8")
+        self.assertNotIn("me_judge@t.demo", text)        # no email
+        self.assertNotIn("MeJudge", text)                 # no display_name
+        self.assertEqual(resp["Cache-Control"], "private, no-store")
+
+    def test_valid_bearer_stamps_last_used_at(self):
+        self.assertIsNone(ApiToken.objects.get(pk=self.token.pk).last_used_at)
+        self._me(self.raw)
+        self.assertIsNotNone(ApiToken.objects.get(pk=self.token.pk).last_used_at)
+
+    def test_missing_bearer_is_401(self):
+        self.assertEqual(self.client.get("/api/v1/me/").status_code, 401)
+
+    def test_malformed_bearer_is_401(self):
+        self.assertEqual(
+            self.client.get("/api/v1/me/", HTTP_AUTHORIZATION="Bearer").status_code, 401)
+        self.assertEqual(
+            self.client.get("/api/v1/me/", HTTP_AUTHORIZATION="Bearer a b").status_code, 401)
+
+    def test_unknown_token_is_401(self):
+        self.assertEqual(self._me("dgf_not_a_real_token").status_code, 401)
+
+    def test_revoked_token_is_401(self):
+        self.assertTrue(token_services.revoke_token(self.user, self.token.ext_id))
+        self.assertEqual(self._me(self.raw).status_code, 401)
+
+    def test_valid_bearer_does_not_change_public_endpoint(self):
+        anon = self.client.get("/api/v1/events/")
+        authed = self.client.get("/api/v1/events/", HTTP_AUTHORIZATION="Bearer " + self.raw)
+        self.assertEqual(anon.status_code, 200)
+        self.assertEqual(authed.status_code, 200)
+        self.assertEqual(anon.content, authed.content)   # public payload is byte-identical
+
+    def test_malformed_bearer_on_public_endpoint_is_401_but_no_header_stays_public(self):
+        # A present-but-broken Authorization header is rejected everywhere (standard DRF behavior);
+        # a request with NO Authorization header stays fully public.
+        self.assertEqual(
+            self.client.get("/api/v1/events/", HTTP_AUTHORIZATION="Bearer bad token").status_code,
+            401)
+        self.assertEqual(self.client.get("/api/v1/events/").status_code, 200)

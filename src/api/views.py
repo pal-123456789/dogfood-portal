@@ -9,15 +9,18 @@ normalize.results.current_results -- the FROZEN, signed run -- never a live reco
 unpublished event returns {"published": false} with no ranking rows.
 """
 from django.shortcuts import get_object_or_404
+from django.utils.cache import patch_vary_headers
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, extend_schema
 from drf_spectacular.views import SpectacularSwaggerView
 from rest_framework import generics
 from rest_framework.exceptions import NotFound
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from events.models import Event, Team, Track
+from apitokens.authentication import BearerTokenAuthentication
+from events.models import Event, EventMembership, Team, Track
 from normalize import certificate, results as results_service
 from submissions.models import Submission
 
@@ -145,6 +148,44 @@ class EventCertificateView(APIView):
         if cert is None:
             raise NotFound("no published results to certify for this event")
         return Response(ResultsCertificateSerializer(cert).data)
+
+
+_ME_EXAMPLE = OpenApiExample(
+    "Authenticated caller (their own identity only)", response_only=True,
+    value={"authenticated": True,
+           "token": {"name": "CI read-only", "prefix": "dgf_AbC123xyz",
+                     "last_used_at": "2026-09-28T12:00:00+00:00"},
+           "memberships": [{"event": "evt_01", "role": "judge", "ext_id": "jdg_01"}]})
+
+
+@extend_schema(tags=["me"], responses=OpenApiTypes.OBJECT, examples=[_ME_EXAMPLE])
+class MeView(APIView):
+    """The authenticated caller's OWN identity, for programmatic clients. This is the ONLY endpoint
+    that requires authentication: send `Authorization: Bearer <token>` (mint one with
+    `manage.py mint_api_token`). It returns only the calling token's metadata and the caller's own
+    event memberships (operational ext_ids and roles) -- never an email, a display name, another
+    user's data, a ballot, or a per-judge score. Setting the auth/permission classes HERE (not
+    globally) keeps every other /api/v1/ endpoint public, authless, and byte-identical."""
+
+    authentication_classes = [BearerTokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        token = request.auth  # the ApiToken this request authenticated with (set by the auth class)
+        memberships = (EventMembership.objects.filter(user=request.user)
+                       .select_related("event").order_by("event__ext_id", "role"))
+        body = {
+            "authenticated": True,
+            "token": {"name": token.name, "prefix": token.prefix,
+                      "last_used_at": token.last_used_at},
+            "memberships": [{"event": m.event.ext_id, "role": m.role, "ext_id": m.ext_id}
+                            for m in memberships],
+        }
+        resp = Response(body)
+        # Per-caller data: never store it in a shared cache, and vary on the credential.
+        resp["Cache-Control"] = "private, no-store"
+        patch_vary_headers(resp, ("Authorization", "Cookie"))
+        return resp
 
 
 class CspSwaggerView(SpectacularSwaggerView):

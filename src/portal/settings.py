@@ -39,6 +39,10 @@ INSTALLED_APPS = [
     # checker routes). `bundles` is model-free (a signed export is computed on the fly from the live
     # event graph); `webhooks` ships models + a 0001 migration for endpoints and recorded deliveries.
     "bundles", "webhooks",
+    # Personal API (Bearer) tokens: ships models + a 0001 migration for the `api_token` table and a
+    # DRF auth class. It ADDS the single authenticated endpoint /api/v1/me/; every other /api/v1/
+    # route stays public/authless and byte-unchanged. Only a token's sha256 hash is stored.
+    "apitokens",
 ]
 
 MIDDLEWARE = [                                                  # §6: this order, all stock
@@ -140,16 +144,20 @@ DOGFOOD_RATE_LIMITS = {                       # [T-0] names follow THREAT-MODEL 
     "webhook_write": os.environ.get("DOGFOOD_RATE_WEBHOOK_WRITE", "60/h"),
 }
 
-# --- Read-only public API (/api/v1/) -------------------------------------------------------
-# DRF is configured PUBLIC and read-only: no authentication classes and AllowAny, so there is no
-# auth surface to get wrong and nothing here can expose a logged-in user's data. Responses are
-# JSON only (the browsable API is off in every environment). PageNumberPagination sets PAGE_SIZE
-# so `manage.py check --fail-level WARNING` (a build gate) stays warning-clean. The anon throttle
-# FAILS OPEN (api/throttling.py) so a cache outage -- or the missing `dogfood_cache` table under
-# `manage.py test` -- can never 500 the API.
+# --- Public API (/api/v1/): read-only + one authenticated self endpoint --------------------
+# The DEFAULT permission is AllowAny, so every endpoint is public and read-only EXCEPT the opt-in
+# /api/v1/me/ view, which sets IsAuthenticated on the view itself. BearerTokenAuthentication is the
+# only auth class: with NO `Authorization: Bearer` header it returns None, so the public endpoints
+# stay anonymous and byte-identical to before; a Bearer header that is malformed or names an
+# unknown/revoked token is a 401 (standard DRF behavior). It reads only a token's sha256 hash and
+# authenticates the owning user -- it can expose no other user's data. Responses are JSON only (the
+# browsable API is off in every environment). PageNumberPagination sets PAGE_SIZE so `manage.py
+# check --fail-level WARNING` (a build gate) stays warning-clean. The anon throttle FAILS OPEN
+# (api/throttling.py) so a cache outage -- or the missing `dogfood_cache` table under `manage.py
+# test` -- can never 500 the API.
 REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-    "DEFAULT_AUTHENTICATION_CLASSES": [],
+    "DEFAULT_AUTHENTICATION_CLASSES": ["apitokens.authentication.BearerTokenAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
@@ -164,9 +172,12 @@ SPECTACULAR_SETTINGS = {
         "Read-only public access to events, tracks, teams, public (SUBMITTED) project "
         "submissions, and official PUBLISHED results. Results are served verbatim from the "
         "signed, frozen normalization run -- never a live recompute -- and an unpublished event "
-        "returns {\"published\": false} with no ranking rows. This API never exposes individual "
-        "ballots, per-judge scores, judge identities, invitations, the audit chain, or any user "
-        "PII (no emails or display names)."
+        "returns {\"published\": false} with no ranking rows. Every endpoint is public and "
+        "unauthenticated EXCEPT /api/v1/me/, which requires a personal Bearer token and returns "
+        "ONLY the calling token's own metadata and the caller's event memberships (operational "
+        "ext_ids and roles). No endpoint exposes individual ballots, per-judge scores, judge "
+        "identities, invitations, the audit chain, another user's data, or any user PII (no "
+        "emails or display names)."
     ),
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,

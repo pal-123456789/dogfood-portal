@@ -27,4 +27,9 @@ urlpatterns = [
     # is not shadowed by, any route above (event-detail matches only `events/<id>/`).
     path("events/<str:ext_id>/certificate/", views.EventCertificateView.as_view(),
          name="event-certificate"),
+    # Appended (#131): the ONLY authenticated endpoint -- a personal Bearer token returns the
+    # caller's own token metadata + event memberships. Exact path `me/`; it cannot shadow, and is
+    # not shadowed by, the `events/<id>/` routes above. Not on the checker's flat routes; not linked
+    # from base.html, so replay stays 7/7.
+    path("me/", views.MeView.as_view(), name="me"),
 ]
