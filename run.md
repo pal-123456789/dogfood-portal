@@ -86,9 +86,11 @@ docker compose exec -T -w /app/src web python -m normalize.release /state/releas
 python3 tools/replay.py
 ```
 
-Replays the fixed API routes a grader hits and confirms every response is **byte-for-byte
-identical** to the reference. It ends on the green **7/7 byte-stable** ladder — hold on that,
-then let the backing track carry the last few seconds.
+Replays the same seven acceptance checks a grader runs — driven entirely by `.dogfood.toml`, the
+same contract file the grader reads — against the fixed routes, and is deliberately stricter in one
+way: it does not follow redirects, so a route that only reaches 200 after an append-slash bounce is
+a visible failure. It ends on the bright green **7/7 checks green** summary — hold on that, then
+let the backing track carry the last few seconds.
 
 ---
 
