@@ -3,10 +3,13 @@ DOGFOOD - ACCEPTANCE REPORT
 
 Project      : DOGFOOD hackathon submission-and-judging platform
 Stack        : Django 5.2 + PostgreSQL 16, self-hosted via `docker compose up`
-Report date  : 2026-09-27 (IST)
+Run date     : 2026-09-27 (IST) - the date of the Increment-1 acceptance run
 Increment    : 1 - Tier 1 (public gallery + deadline-gated submission) and
                Tier 2 (per-judge scoring API + organizer CSV export)
 Result       : 7 / 7 acceptance checks GREEN  ->  Tier 1 VERIFIED, Tier 2 VERIFIED
+Scope        : a FROZEN record of that one run. It covers Tiers 1-2 only and is
+               not a status report for the project as a whole; work landed after
+               2026-09-27 is outside this report and is NOT acceptance-tested here.
 
 
 HOW THIS WAS RUN
@@ -63,7 +66,8 @@ shim is inert.
 
 SEED INTEGRITY (verify_demo - all invariants hold)
 --------------------------------------------------
-Verified at boot (entrypoint step 6.5) and re-run on demand:
+Verified at boot (entrypoint step 7 of the eight steps docs/index.md lists) and
+re-run on demand:
   tracks=8  judges=30  teams=40  projects=41  ballots=126
   single event evt_01, state=CLOSED, submissions_close=2026-03-01 (past)
   scoring graph = exactly ONE connected component
@@ -75,7 +79,10 @@ production boot.
 
 ENVIRONMENT / REPRODUCIBILITY
 -----------------------------
-  Docker Engine   29.7.2 (WSL2 / Ubuntu),  docker compose v5.5.0
+  Host / tooling  Docker Engine with the Compose v2 plugin (invoked as
+                  `docker compose`), on WSL2 / Ubuntu. The exact engine and
+                  plugin build numbers were not captured during the run and are
+                  deliberately not reconstructed here.
   Images          web: python:3.12-slim    db: postgres:16-alpine
   Services        two only (db + web); web runs as non-root uid 10001
   Static assets   WhiteNoise, compressed+manifest storage; no CDN
@@ -87,8 +94,13 @@ ENVIRONMENT / REPRODUCIBILITY
   Boot sequence   assert-state -> wait-for-db -> ensure-secret -> migrate ->
                   createcachetable -> dogfood_import --if-empty -> verify_demo ->
                   ensure-admin -> exec gunicorn
-  Dependencies    ranges pinned in requirements.txt; exact resolved versions
-                  captured in requirements.lock.txt (pip freeze inside web).
+  Dependencies    requirements.txt is a MIX, not ranges throughout: the core
+                  stack (Django, psycopg[binary], gunicorn, whitenoise, numpy,
+                  cryptography, pytest, pytest-django) is bounded by version
+                  RANGES, while the DRF stack (djangorestframework,
+                  drf-spectacular, drf-spectacular-sidecar) is pinned EXACTLY
+                  with `==`. Exact resolved versions for every installed package
+                  are captured in requirements.lock.txt (pip freeze inside web).
 
 
 HONEST NOTES

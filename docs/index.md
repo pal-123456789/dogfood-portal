@@ -46,9 +46,12 @@ written to be checkable line-by-line against `src/`.
 - **Read-only public API** — a versioned, read-only REST API at `/api/v1/` serves public event,
   track, team, and **submitted** project data as JSON, plus the official **frozen, signed** results
   once published, with an OpenAPI 3 schema (`/api/v1/schema/`) and a self-hosted Swagger UI
-  (`/api/v1/docs/`). It is unauthenticated and `GET`-only by construction — there are no write
-  endpoints — and never exposes ballots, per-judge scores, judge identities, invitations, the audit
-  chain, or user PII (`src/api/{views,serializers,urls}.py`).
+  (`/api/v1/docs/`). It is `GET`-only by construction — there are no write endpoints. Every endpoint
+  is public **except** `/api/v1/me/`, which takes a personal Bearer token (minted with
+  `manage.py mint_api_token`, stored only as a sha256 hash) and returns just the caller's own token
+  metadata and event memberships; no endpoint ever exposes ballots, per-judge scores, judge
+  identities, invitations, the audit chain, another user's data, or user PII
+  (`src/api/{views,serializers,urls}.py`, `src/apitokens/*`).
 - **Verifiable results certificate** — for a published event, `GET /api/v1/events/<id>/certificate/`
   (and the operator command `manage.py certificate`) returns a one-page, self-contained attestation
   over the *frozen, signed* normalization run: the engine version, result hash, signer fingerprint,
@@ -57,6 +60,30 @@ written to be checkable line-by-line against `src/`.
   re-checks the run that `normalize.signing` already signed — carries no ballots, per-judge scores,
   judge identities, or PII, and refuses to certify anything that is not published
   (`src/normalize/certificate.py`, `src/api/views.py`).
+- **Awards & public podium** — an organizer defines prizes and may assign winners at
+  `GET/POST /events/<event>/awards/manage`; the **public** podium at `GET /events/<event>/awards`
+  derives every place from the **frozen, signed** result and stays neutral, with no ranking, until
+  results are published. A separate organizer-only **review top-up** view
+  (`GET /events/<event>/awards/topup`) reads the *live, unsigned* standings to show where a few more
+  reviews would most reduce uncertainty at each prize's cutoff — a planning aid, never a score, never
+  the final ranking, and not fraud detection. Assigning a prize never changes the signed result
+  (`src/awards/*`).
+- **Community voting** — an organizer runs a separate, clearly-labelled popularity vote
+  (`/voting/<event>/…`) with an eligibility list, email-confirmed single-use tokens, and
+  one-allocation accounting. It is a second, **unsigned** publication surface and feeds nothing into
+  the judged, signed result (`src/voting/*`).
+- **Project comments** — a signed-in user leaves scoped comments on a submission, rate-limited per
+  author (`src/comments/*`).
+- **Signed participation records** — a participant obtains an Ed25519-signed participation record;
+  the **public verification key** is served at `/.well-known/dogfood-signing-key` so a record can be
+  checked offline (`src/records/*`).
+- **Embeddable gallery widget** — a third-party page embeds a read-only project gallery via
+  `/embed.js` and `/embed/<ext_id>` (`src/embed/*`).
+- **Signed event bundle export/import** — an operator exports an event as an Ed25519-signed bundle
+  and re-imports it on another instance with signature verification (`/bundles/…`, `src/bundles/*`).
+- **Outbound signed webhooks** — an organizer registers endpoints that receive HMAC-signed event
+  notifications, with an SSRF guard on the target URL and a `webhook_write` rate limit
+  (`/webhooks/…`, `src/webhooks/*`).
 - **Real login / logout** with per-IP rate limiting, for humans self-hosting the portal
   (`/accounts/login/`, `/accounts/logout/`, `src/accounts/views.py`).
 - **Offline integrity verification** — the audit log, the normalization run, and a combined
@@ -113,13 +140,16 @@ Their honest scope — what a PASS does and does not bind — is documented in
 
 ## Documentation
 
-- **[Architecture](ARCHITECTURE.md)** — request lifecycle, the nine code units, the DEMO-vs-real
-  auth split, the integrity spine, rate limiting, deployment topology, and an explicit
+- **[Architecture](ARCHITECTURE.md)** — request lifecycle, the seventeen code units, the
+  DEMO-vs-real auth split, the integrity spine, rate limiting, deployment topology, and an explicit
   implemented-vs-planned table.
 - **[Data model](DATA-MODEL.md)** — every shipped model, its fields, constraints, and
-  relationships, plus which tables are live-endpoint vs seed-only, with an ER diagram.
+  relationships, plus which tables are live-endpoint vs seed-only, with ER diagrams.
 - **[Judging & normalization](JUDGING.md)** — the score-normalization method, the reproducibility
-  contract, and the ablation table.
+  contract, and a pointer to the per-control ablation table.
+- **[Ablation](ABLATION.md)** — a per-control table: what each integrity or credibility control
+  buys, how the system would behave *without* it, and the file, test, and command a reviewer can
+  check independently.
 - **[Threat model](THREAT-MODEL.md)** — the security controls that ship, and those that are design
   only, declined, or accepted risk.
 
