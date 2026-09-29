@@ -65,7 +65,10 @@ def _seed_event(prefix, *, publish):
         judges.append(u)
         for sid, sub in subs.items():
             asg = JudgeAssignment.objects.create(judge=m, submission=sub)
-            v = base[sid] + bias
+            # Clamp into the ballot's valid 1..5 range: the lowest project (d) under the -1 judge
+            # lands on 0, and the top project (a) under +1 lands on 5 -- only the floor underflows.
+            # a/b/c scores are unaffected, so the raw ordering a>b>c>d and the podium are preserved.
+            v = max(1, min(5, base[sid] + bias))
             Ballot.objects.create(assignment=asg, functionality=v, quality=v, innovation=v)
     org = AppUser.objects.create_user(email="%s_org@t.demo" % prefix, display_name="%sOrg" % prefix)
     EventMembership.objects.create(user=org, event=ev, role=EventMembership.ORGANIZER)
