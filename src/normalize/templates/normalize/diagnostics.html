@@ -84,4 +84,19 @@
 {% else %}
 <p class="notice">No ballots recorded yet — the diagnostics panel appears once judging begins.</p>
 {% endif %}
+
+<h2 class="sec">Duplicate submissions</h2>
+<p class="notice">Submissions in the <b>same track</b> whose titles match after normalizing case and whitespace — a likely duplicate or near-duplicate re-submission. Display-only: it never changes the ranking, the published result, or any score, and a shared title is a prompt to look, not a verdict (two teams can independently pick the same name).</p>
+{% if duplicate_clusters %}
+<p class="notice">{{ duplicate_clusters|length }} cluster(s) flagged.</p>
+<table class="lb"><thead><tr><th>Track</th><th>Title</th><th>Submissions (team)</th></tr></thead><tbody>
+{% for c in duplicate_clusters %}<tr>
+  <td class="ci">{{ c.track }}</td>
+  <td>{{ c.display_title }} <span class="ci">· normalized: {{ c.title }}</span></td>
+  <td>{% for m in c.entries %}{{ m.ext_id }} <span class="ci">({{ m.team }})</span>{% if not forloop.last %}, {% endif %}{% endfor %}</td>
+</tr>{% endfor %}
+</tbody></table>
+{% else %}
+<p class="notice"><span class="ok">none</span> No duplicate submissions detected.</p>
+{% endif %}
 {% endblock %}

@@ -185,7 +185,8 @@ def diagnostics(request):
         msg, status = err
         return HttpResponse(msg, status=status, content_type="text/plain")
     return render(request, "normalize/diagnostics.html",
-                  {"event": event, "data": services.diagnostics_report(event)})
+                  {"event": event, "data": services.diagnostics_report(event),
+                   "duplicate_clusters": services.duplicate_clusters(event)})
 
 
 def diagnostics_json(request):

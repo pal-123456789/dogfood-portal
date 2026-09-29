@@ -13,7 +13,7 @@ from events.models import Event
 from judging.models import Ballot, RubricWeight
 from submissions.models import Submission
 
-from . import diagnostics, engine
+from . import diagnostics, duplicates, engine
 
 
 def current_event():
@@ -203,3 +203,20 @@ def diagnostics_report(event, lam=None, seed=0):
     if not y:
         return {"n_ballots": 0, "scope": "review diagnostics, not fraud detection"}
     return diagnostics.report(y, jk, sk, _display(event), vectors=vectors, lam=lam, seed=seed)
+
+
+def duplicate_clusters(event):
+    """Display-only within-track duplicate-title diagnostic for the review panel (see
+    normalize.duplicates -- NOT fraud detection). Scopes to the event's SUBMITTED submissions -- the
+    same draft/withdrawn-excluded set the public gallery and API use -- builds plain
+    {ext_id, team, track, title} rows, and hands them to the pure detector.
+
+    READ-ONLY and independent of ballots (submissions cluster before any judging), so it can never
+    move the signed result, the leaderboard, or any hash. Returns [] when nothing is flagged.
+    """
+    subs = (Submission.objects
+            .filter(event=event, state=Submission.SUBMITTED)
+            .select_related("team", "track"))
+    rows = [{"ext_id": s.ext_id, "team": s.team.ext_id,
+             "track": s.track.ext_id, "title": s.title} for s in subs]
+    return duplicates.find_duplicate_clusters(rows)

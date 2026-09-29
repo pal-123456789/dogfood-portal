@@ -1117,3 +1117,60 @@ class ExplainRankViewTests(TestCase):
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.content, b"results not published")
 
+
+class DuplicateSubmissionsDiagnosticTests(TestCase):
+    """DB-backed test for the display-only within-track duplicate-title diagnostic (#134).
+
+    The organizer diagnostics view exposes services.duplicate_clusters(event) to the template as
+    `duplicate_clusters`. Two SUBMITTED projects by DIFFERENT teams in the SAME track share a title
+    (a case/whitespace variant included) and must surface as one cluster; a third project with a
+    unique title must NOT. The fixture stands alone -- no seed data and no ballots, since duplicate
+    detection is a submission-level read independent of judging -- and drives the real
+    organizer-gated /normalize/diagnostics route.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.event = Event.objects.create(
+            ext_id="evt_dup", name="Dup Event", state=Event.CLOSED,
+            submissions_close=timezone.now() - timezone.timedelta(days=1))
+        track = Track.objects.create(ext_id="trk_dup", event=cls.event, name="Dup")
+        team_x = Team.objects.create(ext_id="tm_x", event=cls.event, name="Team X")
+        team_y = Team.objects.create(ext_id="tm_y", event=cls.event, name="Team Y")
+        team_z = Team.objects.create(ext_id="tm_z", event=cls.event, name="Team Z")
+        Submission.objects.create(
+            ext_id="prj_dup_1", event=cls.event, team=team_x, track=track,
+            title="Shared Title", state=Submission.SUBMITTED)
+        Submission.objects.create(                          # case + whitespace variant, other team
+            ext_id="prj_dup_2", event=cls.event, team=team_y, track=track,
+            title="  shared   TITLE ", state=Submission.SUBMITTED)
+        Submission.objects.create(                          # unique title -> never clustered
+            ext_id="prj_solo", event=cls.event, team=team_z, track=track,
+            title="Unique Title", state=Submission.SUBMITTED)
+        cls.org = User.objects.create_user(email="duporg@t.demo", display_name="DupOrg")
+        EventMembership.objects.create(user=cls.org, event=cls.event,
+                                       role=EventMembership.ORGANIZER)
+
+    def test_view_context_exposes_the_within_track_duplicate_cluster(self):
+        c = Client()
+        c.force_login(self.org)
+        resp = c.get("/normalize/diagnostics")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, "normalize/diagnostics.html")
+        clusters = resp.context["duplicate_clusters"]
+        self.assertEqual(len(clusters), 1)
+        cl = clusters[0]
+        self.assertEqual(cl["track"], "trk_dup")
+        self.assertEqual(cl["title"], "shared title")       # normalized across case + whitespace
+        self.assertEqual(cl["submissions"], ["prj_dup_1", "prj_dup_2"])
+        self.assertNotIn("prj_solo", cl["submissions"])     # the unique-title project is excluded
+
+    def test_rendered_page_lists_the_cluster_and_not_the_singleton(self):
+        c = Client()
+        c.force_login(self.org)
+        resp = c.get("/normalize/diagnostics")
+        self.assertContains(resp, "Duplicate submissions")
+        self.assertContains(resp, "prj_dup_1")
+        self.assertContains(resp, "prj_dup_2")
+        self.assertNotContains(resp, "prj_solo")            # a singleton never surfaces
+
